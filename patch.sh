@@ -54,7 +54,7 @@ run_onbox() {
 }
 
 echo "NOTE: ${ROLE} (${ID}) — verdict BEFORE patch:"
-./check-exposure.sh "${ROLE}"
+./lab-verdicts.sh "${ROLE}"
 
 # On-box remediation. Downloads the fixed Corretto, repoints the JDK symlink the
 # decoder service runs from, restarts it on the patched runtime, and refreshes

@@ -42,18 +42,25 @@ resource "aws_instance" "node" {
     encrypted   = true
   }
 
-  user_data = templatefile("${path.module}/scripts/userdata.sh.tftpl", {
-    node_role        = each.value.role
-    jdk_url          = each.value.jdk_url
-    jdk_version      = each.value.jdk_version
-    expected_verdict = each.value.expected
-    expected_reason  = each.value.reason
-    affected_version = var.affected_version
-    fixed_version    = var.fixed_version
-    decoder_port     = var.decoder_port
-    region           = var.region
-    deployment_name  = local.name
-  })
+  # gzip the rendered user data: injecting the full check-exposure.sh detector
+  # (below) pushes it past EC2's 16 KB plaintext limit; cloud-init transparently
+  # decompresses a gzip-magic payload.
+  user_data_base64 = base64gzip(templatefile(
+    "${path.module}/scripts/userdata.sh.tftpl", {
+      node_role        = each.value.role
+      jdk_url          = each.value.jdk_url
+      jdk_version      = each.value.jdk_version
+      expected_verdict = each.value.expected
+      expected_reason  = each.value.reason
+      affected_version = var.affected_version
+      fixed_version    = var.fixed_version
+      decoder_port     = var.decoder_port
+      region           = var.region
+      deployment_name  = local.name
+      # The portable detector, injected verbatim so the node runs the exact
+      # same script we ship in the repo and viewers run on their own hosts.
+      detector = file("${path.module}/../check-exposure.sh")
+  }))
 
   tags = {
     Name            = "${local.name}-${each.value.role}"

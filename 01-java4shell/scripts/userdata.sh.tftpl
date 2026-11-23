@@ -183,69 +183,45 @@ UNIT_EOF
 sed -i "s|__DECODER_PORT__|$${DECODER_PORT}|" /etc/systemd/system/java4shell-decoder.service
 
 # ------------------------------------------------------------------------------
-# exposure-check.sh — the single source of verdict truth, run at boot and again
-# by check-exposure.sh / patch.sh / validate.sh (over SSM). Writing it to the
-# box keeps the logic identical whether it runs now or later.
+# check-exposure.sh — the portable, read-only detector. Injected verbatim from
+# the repo file (instances.tf passes file("../check-exposure.sh")), so the node
+# runs the exact same script we ship and viewers lift. ALL detection logic is
+# here; nothing in this lab re-implements it.
+# ------------------------------------------------------------------------------
+cat > "$${APPDIR}/check-exposure.sh" <<'DETECTOR_EOF'
+${detector}
+DETECTOR_EOF
+chmod +x "$${APPDIR}/check-exposure.sh"
+
+# ------------------------------------------------------------------------------
+# exposure-check.sh — thin lab wrapper. Runs the detector above, then publishes
+# this node's verdict as a page + Custom:Java4Shell SSM Inventory entry and
+# echoes the keys validate.sh / lab-verdicts.sh / patch.sh parse over SSM. It
+# holds no detection logic of its own.
 # ------------------------------------------------------------------------------
 cat > "$${APPDIR}/exposure-check.sh" <<'EXPOSURE_EOF'
 #!/bin/bash
-# Computes this node's CVE-2026-114938 exposure verdict, writes the verdict page
-# and verdict.json, and publishes a Custom:Java4Shell SSM Inventory entry.
 set -uo pipefail
 
 NODE_ROLE="${node_role}"
 EXPECTED="${expected_verdict}"
-EXPECTED_REASON="${expected_reason}"
-FIXED_VERSION="${fixed_version}"
 DEPLOYMENT="${deployment_name}"
 REGION="${region}"
 APPDIR=/opt/java4shell
-JAVA="$${APPDIR}/jdk/bin/java"
 
-# --- Java version actually installed ---
-if [ -x "$${JAVA}" ] && [ "$(cat $${APPDIR}/jdk_ok 2>/dev/null)" = "true" ]; then
-  RAW=$("$${JAVA}" -version 2>&1)
-  # The quoted token is the upstream OpenJDK version (e.g. 21.0.13 or 21.0.13.1),
-  # which is vendor-independent and what the fix threshold is expressed in.
-  VER=$(printf '%s\n' "$${RAW}" | head -1 | sed -E 's/.*"([0-9][0-9._]*)".*/\1/')
-else
-  RAW="(no JDK installed)"
-  VER="none"
-fi
-
-# --- CPU capability: the AVX-512 VBMI intrinsic the bug lives in ---
-# The Linux cpuinfo flag is "avx512vbmi" (no underscore) on current kernels; the
-# underscored "avx512_vbmi2" is a DIFFERENT feature (VBMI2) and must not match.
-# -w keeps avx512vbmi from matching inside avx512_vbmi2, and the alternation
-# tolerates kernels that spell the base feature with an underscore.
-if grep -qiwE 'avx512vbmi|avx512_vbmi' /proc/cpuinfo; then VBMI="yes"; else VBMI="no"; fi
-ARCH=$(uname -m)
-
-# --- Is the running decoder mitigated by a JVM flag? ---
-MIT="no"
-if pgrep -af 'java .*Decoder.java' 2>/dev/null | grep -qiE 'UseBASE64Intrinsics|UseAVX=2'; then
-  MIT="yes"
-fi
-
-# --- Verdict ---
-# EXPOSED only when all three hold: a vulnerable JDK, an AVX-512 VBMI CPU, and
-# no mitigation flag. Patched JDK or missing intrinsic => safe outright.
-if [ "$${VER}" = "none" ]; then
-  VERDICT="UNKNOWN"
-  REASON="JDK install failed — verify the affected Corretto build URL (it may be pulled)"
-elif dpkg --compare-versions "$${VER}" ge "$${FIXED_VERSION}"; then
-  VERDICT="NOT_EXPOSED"
-  REASON="JDK is patched ($${VER} >= $${FIXED_VERSION})"
-elif [ "$${VBMI}" = "no" ]; then
-  VERDICT="NOT_EXPOSED"
-  REASON="CPU has no AVX-512 VBMI — the vulnerable Base64 intrinsic is never used ($${ARCH})"
-elif [ "$${MIT}" = "yes" ]; then
-  VERDICT="MITIGATED"
-  REASON="vulnerable JDK on a VBMI CPU, but the intrinsic is disabled by a JVM flag (stopgap)"
-else
-  VERDICT="EXPOSED"
-  REASON="vulnerable JDK ($${VER}) on an AVX-512 VBMI CPU, intrinsic active"
-fi
+# Run the portable detector. --no-exec keeps it fast and side-effect-free at
+# boot: versions come from the JDK release files, never by launching java.
+OUT="$("$${APPDIR}/check-exposure.sh" --no-exec --porcelain 2>/dev/null || true)"
+VERDICT=$(printf '%s\n' "$${OUT}" | sed -n 's/^VERDICT=//p'      | head -1)
+VER=$(printf '%s\n'     "$${OUT}" | sed -n 's/^JAVA_VERSION=//p' | head -1)
+ARCH=$(printf '%s\n'    "$${OUT}" | sed -n 's/^ARCH=//p'         | head -1)
+VBMI=$(printf '%s\n'    "$${OUT}" | sed -n 's/^AVX512_VBMI=//p'  | head -1)
+REASON=$(printf '%s\n'  "$${OUT}" | sed -n 's/^REASON=//p'       | head -1)
+# The decoder may not be up on the first boot pass; the detector then sees only
+# the idle JDK, which still yields the right verdict for this node.
+[ -n "$${VERDICT}" ] || { VERDICT="UNKNOWN"; REASON="detector produced no verdict"; }
+[ -n "$${VER}" ] || VER="none"
+MIT="no"; [ "$${VERDICT}" = "MITIGATED" ] && MIT="yes"
 
 # --- Colour for the page ---
 case "$${VERDICT}" in

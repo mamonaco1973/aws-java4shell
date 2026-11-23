@@ -56,17 +56,23 @@ coordinates), and `outputs.tf`.
 Each node's user data installs its pinned Corretto build, starts a **minimal
 Base64-decode HTTP service** (the realistic exposure surface — a normal endpoint
 that decodes caller-supplied input, like code parsing JWTs or basic-auth
-headers), then runs `/opt/java4shell/exposure-check.sh`, which:
+headers), then runs the **portable detector**, `check-exposure.sh` — the exact
+same script this repo ships and you can lift onto any host. It implements the
+method published by [JFrog](https://research.jfrog.com/post/java4shell-vulnerability/)
+and [Datadog Security Labs](https://securitylabs.datadoghq.com/articles/java4shell-remote-code-execution-in-openjdk-cve-2026-114938/),
+so a node is exposed only when **all three** hold:
 
-1. reads the installed Java version (`java -version` — the vendor-independent
-   upstream string, e.g. `21.0.13` vs `21.0.13.1`);
-2. checks the CPU for the vulnerable intrinsic (`grep avx512vbmi /proc/cpuinfo` —
-   the base VBMI flag, distinct from the unrelated `avx512_vbmi2`);
-3. checks whether the running JVM has a mitigation flag;
-4. combines them: **patched version → NOT_EXPOSED**; **no VBMI → NOT_EXPOSED**;
-   **mitigation flag → MITIGATED**; otherwise **EXPOSED**;
-5. writes a verdict page (served on `:80`, reachable via an SSM tunnel) and
-   publishes a **`Custom:Java4Shell` SSM Inventory** entry.
+1. **a vulnerable JDK** — compared against the per-release fixed builds
+   (`17.0.21.1` / `21.0.13.1` / `25.0.5.1` / `27.0.1.1`), with EOL trains and the
+   Oracle 8 Performance Pack handled — not a single hardcoded version;
+2. **an AVX-512 VBMI CPU** — the full flag set the vulnerable intrinsic needs
+   (`avx512f`, `avx512bw`, `avx512vbmi`, `bmi2`), so ARM/Graviton is immune;
+3. **the intrinsic enabled** — no mitigating JVM flag.
+
+The detector inspects **every** JVM on the box (running ones via `/proc`, plus
+installed JDKs), not just `java` on PATH. A thin lab wrapper then serves the
+verdict page on `:80` (reachable via an SSM tunnel) and publishes a
+**`Custom:Java4Shell` SSM Inventory** entry.
 
 Because the verdict is published to SSM Inventory, `fleet-query.sh` can list
 every affected node **account-wide** — including JDKs installed from a tarball,
@@ -78,7 +84,8 @@ which the stock package inventory never sees.
 |---|---|
 | `./apply.sh` | check env, `terraform init && apply`, then `validate.sh` |
 | `./validate.sh` | wait for all nodes on SSM, assert each live verdict matches its intended one |
-| `./check-exposure.sh [node...]` | print the live verdict for one/all nodes (version + VBMI + reason) |
+| `./check-exposure.sh` | **the portable detector** — read-only, run it on any host (`--porcelain`, `--no-exec`); the same script the nodes run |
+| `./lab-verdicts.sh [node...]` | print the live verdict for one/all lab nodes over SSM (fan-out around the detector) |
 | `./patch.sh [node]` | upgrade `vuln-x86` in place to the fixed JDK, restart, re-check (EXPOSED → NOT_EXPOSED) |
 | `./fleet-query.sh` | SSM Inventory query of `Custom:Java4Shell`, account-wide for the region |
 | `./destroy.sh` | tear everything down |
@@ -148,7 +155,7 @@ patched-x86    NOT_EXPOSED  NOT_EXPOSED  21.0.13.1  yes    PASS
 2. **Triage the fleet:** `./fleet-query.sh` — one line per node, EXPOSED first.
 3. **Reach the decoder** (the exposure surface) the same way, forwarding
    `8080`, and point your `calif.io/java4shell` PoC at `localhost`.
-4. **Remediate:** `./patch.sh`, then `./check-exposure.sh vuln-x86` — the
+4. **Remediate:** `./patch.sh`, then `./lab-verdicts.sh vuln-x86` — the
    verdict flips to `NOT_EXPOSED`.
 
 ## Teardown
