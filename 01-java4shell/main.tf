@@ -21,41 +21,56 @@ terraform {
 }
 
 provider "aws" {
-  region = "us-east-2"
+  region = var.region
 }
 
 # ================================================================================
-# AMI Lookup
-# Queries AWS for the latest Ubuntu 24.04 LTS AMI at plan time, eliminating
-# the need to hard-code an AMI ID or maintain a Packer pipeline. Ubuntu is used
-# here rather than Amazon Linux so this deployment matches the Azure, GCP, and
-# OCI equivalents — a common OS keeps cross-cloud comparisons honest.
+# AMI Lookups — two architectures
+# This lab deliberately mixes architectures: the two "exposed-surface" nodes
+# run on x86-64 (where the AVX-512 VBMI Base64 intrinsic exists and CVE-2026-
+# 114938 is reachable), and the control node runs on ARM64 (Graviton), where
+# the vulnerable intrinsic does not exist at all. So we need both AMIs.
+#
+# Both are Canonical's Ubuntu 24.04 LTS, queried at plan time so no AMI ID is
+# ever hard-coded. The only difference is the architecture token in the name.
 # ================================================================================
 
-data "aws_ami" "ubuntu" {
+# x86-64 image for the c7i (Intel Sapphire Rapids) nodes — vuln-x86, patched-x86
+data "aws_ami" "ubuntu_x86" {
   most_recent = true
+  owners      = ["099720109477"] # Canonical's official publisher account
 
-  # Canonical's official publisher account — filtering by owner prevents a
-  # look-alike community AMI from ever matching the name pattern below
-  owners = ["099720109477"]
-
-  # "noble" is the 24.04 LTS codename. The hvm-ssd* wildcard is deliberate:
-  # Canonical publishes newer 24.04 builds under hvm-ssd-gp3, so a hardcoded
-  # hvm-ssd path silently stops matching current images.
   filter {
     name   = "name"
-    values = ["ubuntu/images/hvm-ssd*/ubuntu-noble-24.04-arm64-server-*"]
+    values = ["ubuntu/images/hvm-ssd*/ubuntu-noble-24.04-amd64-server-*"]
   }
 
-  # HVM (hardware virtual machine) is required for current-gen instance types;
-  # paravirtual is a legacy mode not supported on t2/t3 and newer
   filter {
     name   = "virtualization-type"
     values = ["hvm"]
   }
 
-  # EBS-backed instances support stop/start and snapshot; instance-store
-  # instances are ephemeral and cannot be stopped — EBS is the safe default
+  filter {
+    name   = "root-device-type"
+    values = ["ebs"]
+  }
+}
+
+# ARM64 image for the t4g (Graviton) node — safe-arm
+data "aws_ami" "ubuntu_arm" {
+  most_recent = true
+  owners      = ["099720109477"]
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd*/ubuntu-noble-24.04-arm64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
   filter {
     name   = "root-device-type"
     values = ["ebs"]

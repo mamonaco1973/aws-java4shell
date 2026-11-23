@@ -6,10 +6,9 @@ from inline SVG, so a `prefers-color-scheme` media query inside the document is
 silently dropped. The README pairs them with <picture>, which GitHub honours.
 
 A README diagram is studied, not narrated, so it is COMPLETE rather than
-minimal: the browser, the load balancer and its target group, the Auto
-Scaling group with its launch template, the two CPU alarms and their scaling
-policies, the NAT gateway the instances reach the internet through, and the
-SSM role are all on it.
+minimal: the operator and PoC, the SSM plane that is the only way in, all three
+lab nodes with the verdict each is built to produce, the NAT gateway the nodes
+reach out through, and the Corretto archive the pinned JDKs come from.
 Run:  python3 make_diagram.py
 """
 
@@ -26,7 +25,7 @@ MARGIN = 40
 COL = [MARGIN + i * (NW + GUTTER) for i in range(3)]
 ROW = [40 + i * 200 for i in range(4)]
 W = MARGIN * 2 + NW * 3 + GUTTER * 2
-H = ROW[-1] + NH + 40 + 0
+H = ROW[-1] + NH + 40
 TITLE_PX, SUB_PX, EDGE_PX = 26, 17, 16
 
 THEMES = {
@@ -34,13 +33,13 @@ THEMES = {
         "bg": "#0d1117", "panel": "#161b22", "text": "#e6edf3",
         "muted": "#8b949e", "line": "#58a6ff", "local": "#39c5bb",
         "purple": "#c39be8", "navy": "#c8d6e8", "blue": "#58a6ff",
-        "amber": "#f2c163", "store": "#7ee787",
+        "amber": "#f2c163", "store": "#7ee787", "danger": "#ff6b66",
     },
     "light": {
         "bg": "#ffffff", "panel": "#f6f8fa", "text": "#1f2328",
         "muted": "#59636e", "line": "#0969da", "local": "#137e77",
         "purple": "#8250df", "navy": "#475467", "blue": "#0969da",
-        "amber": "#9a6700", "store": "#1a7f37",
+        "amber": "#9a6700", "store": "#1a7f37", "danger": "#cf222e",
     },
 }
 
@@ -49,17 +48,11 @@ ICONS = {
     "globe": ['<circle cx="12" cy="12" r="10"/>',
               '<path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>',
               '<path d="M2 12h20"/>'],
-    "route": ['<circle cx="6" cy="19" r="3"/>', '<circle cx="18" cy="5" r="3"/>',
-              '<path d="M12 19h4.5a3.5 3.5 0 0 0 0-7h-8a3.5 3.5 0 0 1 0-7H12"/>'],
     "network": ['<rect x="16" y="16" width="6" height="6" rx="1"/>',
                 '<rect x="2" y="16" width="6" height="6" rx="1"/>',
                 '<rect x="9" y="2" width="6" height="6" rx="1"/>',
                 '<path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/>',
                 '<path d="M12 12V8"/>'],
-    "layers": ['<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83'
-               'l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/>',
-               '<path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/>',
-               '<path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>'],
     "database": ['<ellipse cx="12" cy="5" rx="9" ry="3"/>',
                  '<path d="M3 5V19A9 3 0 0 0 21 19V5"/>',
                  '<path d="M3 12A9 3 0 0 0 21 12"/>'],
@@ -72,87 +65,82 @@ ICONS = {
                 '<line x1="12" x2="12" y1="17" y2="21"/>'],
     "terminal": ['<polyline points="4 17 10 11 4 5"/>',
                  '<line x1="12" x2="20" y1="19" y2="19"/>'],
-    "users": ['<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>',
-              '<circle cx="9" cy="7" r="4"/>',
-              '<path d="M22 21v-2a4 4 0 0 0-3-3.87"/>',
-              '<path d="M16 3.13a4 4 0 0 1 0 7.75"/>'],
-    "file": ['<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>',
-             '<path d="M14 2v4a2 2 0 0 0 2 2h4"/>', '<path d="M10 9H8"/>',
-             '<path d="M16 13H8"/>', '<path d="M16 17H8"/>'],
+    "cpu": ['<rect x="4" y="4" width="16" height="16" rx="2"/>',
+            '<rect x="9" y="9" width="6" height="6"/>',
+            '<path d="M15 2v2"/>', '<path d="M15 20v2"/>', '<path d="M2 15h2"/>',
+            '<path d="M2 9h2"/>', '<path d="M20 15h2"/>', '<path d="M20 9h2"/>',
+            '<path d="M9 2v2"/>', '<path d="M9 20v2"/>'],
+    "shield": ['<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 '
+               '13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 '
+               '3.81 17 5 19 5a1 1 0 0 1 1 1z"/>'],
 }
 
 NODES = {}
 
 
 def _r(nid):
-    """Return (left, top, right, bottom, centre-x, centre-y) for a node."""
     x, y = NODES[nid][0], NODES[nid][1]
     return x, y, x + NW, y + NH, x + NW / 2, y + NH / 2
 
 
-def gutter_x(c):
-    """Centre of the gutter to the right of column c."""
-    return COL[c] + NW + GUTTER / 2
-
-
 def gutter_y(r):
-    """Centre of the gap below row r."""
     return ROW[r] + NH + (ROW[1] - ROW[0] - NH) / 2
 
 
 # ------------------------------------------------------------------------------
 # Layout
-# ------------------------------------------------------------------------------
-# Requests come straight down the middle: browser, load balancer, Auto Scaling
-# group. The launch template sits left of the group and the CloudWatch alarms
-# right of it; the NAT gateway and SSM role are along the bottom.
+# Operator at top, the SSM plane below it (the only way in), the three nodes
+# across the middle, and the egress path to the Corretto archive at the bottom.
 #
 # id: (x, y, colour key, icon, title, subtitle[, "dashed"])
+# ------------------------------------------------------------------------------
 NODES.update({
-    "browser":  (COL[1], ROW[0], "navy", "globe", "Browser / curl",
-                 "from the internet"),
-    "alb":      (COL[1], ROW[1], "amber", "route", "asg-<suffix>-alb",
-                 "public subnets, HTTP 80, health /"),
-    "asg":      (COL[1], ROW[2], "blue", "terminal", "asg-<suffix>-main",
-                 "1-6 instances (desired 4), private"),
-    "lt":       (COL[0], ROW[2], "navy", "file", "Launch template",
-                 "Ubuntu 24.04 ARM64, t4g.micro, Apache"),
-    "alarms":   (COL[2], ROW[2], "purple", "monitor", "CloudWatch alarms",
-                 "cpu-high > 60% (2 min), cpu-low < 60% (1 h)"),
-    "nat":      (COL[1], ROW[3], "navy", "network", "NAT gateway",
-                 "outbound for package installs"),
-    "ssm":      (COL[0], ROW[3], "purple", "key", "SSM instance profile",
-                 "AmazonSSMManagedInstanceCore"),
+    "op":      (COL[1], ROW[0], "navy", "terminal", "Operator + PoC",
+                "AWS CLI, and your calif.io PoC"),
+    "ssm":     (COL[1], ROW[1], "purple", "key", "AWS SSM",
+                "Session Manager / Run Command / Inventory"),
+    "vuln":    (COL[0], ROW[2], "danger", "cpu", "vuln-x86",
+                "c7i x86 / Corretto 21.0.13 / EXPOSED"),
+    "arm":     (COL[1], ROW[2], "store", "shield", "safe-arm",
+                "t4g ARM64 / 21.0.13 / immune, no VBMI"),
+    "patched": (COL[2], ROW[2], "store", "shield", "patched-x86",
+                "c7i x86 / Corretto 21.0.13.1 / patched"),
+    "nat":     (COL[1], ROW[3], "navy", "network", "NAT gateway",
+                "egress only - no inbound path exists"),
+    "corretto": (COL[2], ROW[3], "local", "database", "Corretto archive",
+                 "pinned JDK tarballs (verify vuln build)", "dashed"),
 })
 
-br, alb, asg, lt = _r("browser"), _r("alb"), _r("asg"), _r("lt")
-al, nat, ssm = _r("alarms"), _r("nat"), _r("ssm")
+op, ssm, vuln, arm = _r("op"), _r("ssm"), _r("vuln"), _r("arm")
+patched, nat, cor = _r("patched"), _r("nat"), _r("corretto")
 
 # id: (path, colour key, label, label_x, label_y, anchor[, "dashed"])
 EDGES = {
-    "e_http":   (f"M{br[4]},{br[3]} V{alb[1] - 5}", "line",
-                 "HTTP", br[4] + 14, gutter_y(0) + 6, "start"),
-    "e_tg":     (f"M{alb[4]},{alb[3]} V{asg[1] - 5}", "line",
-                 "target group", alb[4] + 14, gutter_y(1) + 6, "start"),
-    "e_lt":     (f"M{lt[2]},{lt[5]} H{asg[0] - 5}", "navy",
-                 "launches", gutter_x(0), lt[5] - 12, "middle"),
-    "e_scale":  (f"M{al[0]},{al[5]} H{asg[2] + 5}", "purple",
-                 "+1 / -1", gutter_x(1), al[5] - 12, "middle"),
-    "e_nat":    (f"M{asg[4]},{asg[3]} V{nat[1] - 5}", "line",
-                 "egress", asg[4] + 14, gutter_y(2) + 6, "start"),
-    "e_ssm":    (f"M{ssm[4]},{ssm[1]} V{lt[3] + 5}", "purple",
-                 "attached", ssm[4] + 14, gutter_y(2) + 6, "start"),
+    "e_in":   (f"M{op[4]},{op[3]} V{ssm[1] - 5}", "purple",
+               "SSM only", op[4] + 14, gutter_y(0) + 6, "start"),
+    "e_arm":  (f"M{ssm[4]},{ssm[3]} V{arm[1] - 5}", "purple",
+               "exec . verdict", ssm[4] + 14, gutter_y(1) + 6, "start"),
+    "e_vuln": (f"M{ssm[4]},{ssm[3]} L{vuln[4]},{vuln[1] - 5}", "purple",
+               "", 0, 0, "middle"),
+    "e_pat":  (f"M{ssm[4]},{ssm[3]} L{patched[4]},{patched[1] - 5}", "purple",
+               "", 0, 0, "middle"),
+    "e_eg":   (f"M{arm[4]},{arm[3]} V{nat[1] - 5}", "line",
+               "egress", arm[4] + 14, gutter_y(2) + 6, "start"),
+    "e_dl":   (f"M{nat[2]},{nat[5]} H{cor[0] - 5}", "local",
+               "JDK pull", (nat[2] + cor[0]) / 2, nat[5] - 12, "middle", "dashed"),
 }
 
-ALT = ("Requests from the internet reach the asg Application Load Balancer in "
-       "two public subnets in us-east-2 on HTTP port 80, which forwards through "
-       "its target group to the instances of the Auto Scaling group, one to six "
-       "(desired four) t4g.micro Ubuntu 24.04 ARM64 instances in private "
-       "subnets, launched from a launch template that installs Apache and "
-       "serves a page of instance metadata. A CloudWatch alarm adds an instance "
-       "when average CPU is above 60% for two minutes and another removes one "
-       "when it stays below 60% for an hour. The instances reach the internet "
-       "through a NAT gateway and carry an instance profile for SSM.")
+ALT = ("The operator, running the AWS CLI and the public calif.io proof of "
+       "concept, reaches the lab only through AWS SSM - Session Manager, Run "
+       "Command and Inventory - because the nodes have no inbound network path. "
+       "SSM drives three nodes in private subnets: vuln-x86, a c7i x86 instance "
+       "running the vulnerable Corretto 21.0.13 on an AVX-512 VBMI CPU, which is "
+       "EXPOSED; safe-arm, a t4g Graviton ARM64 instance on the same vulnerable "
+       "Java that is immune because ARM has no VBMI intrinsic; and patched-x86, "
+       "a c7i x86 instance on the fixed Corretto 21.0.13.1. The nodes reach out "
+       "through a NAT gateway, egress only, to pull their pinned JDK tarballs "
+       "from the Amazon Corretto archive. Each node publishes its verdict to SSM "
+       "Inventory.")
 
 # ------------------------------------------------------------------------------
 # Rendering
@@ -163,7 +151,6 @@ FONT = "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-seri
 
 
 def node_svg(nid, t):
-    """Render one service box: rounded panel, icon, title, subtitle."""
     x, y, key, icon, title, sub, *opt = NODES[nid]
     title, sub = escape(title), escape(sub)
     colour = t[key]
@@ -186,8 +173,6 @@ def node_svg(nid, t):
 
 
 def edge_svg(eid, t):
-    """Render one arrow plus its label (on a background chip, so lines that
-    pass behind a label never cut through its text)."""
     d, key, label, lx, ly, anchor, *opt = EDGES[eid]
     label = escape(label)
     colour = t[key]
@@ -203,10 +188,8 @@ def edge_svg(eid, t):
 
 
 def build(t):
-    """Assemble the diagram for one theme."""
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
            f'viewBox="0 0 {W} {H}" role="img" aria-label="{ALT}">', "<defs>"]
-    # One marker per edge: a shared marker cannot carry per-edge colour.
     for eid, spec in EDGES.items():
         out.append(
             f'<marker id="a_{eid}" viewBox="0 0 10 10" refX="9" refY="5" '

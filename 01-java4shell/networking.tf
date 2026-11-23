@@ -1,29 +1,30 @@
 # ================================================================================
 # Networking
-# Two-tier network: public subnets host the ALB; private subnets host instances.
-# Instances reach the internet through a NAT gateway and are never directly
-# reachable from outside the VPC.
+# Two-tier network. The public subnets exist only to host the NAT gateway; the
+# three lab nodes live in the private subnets with no public IP and no inbound
+# path from the internet. Outbound (Corretto downloads, apt, SSM endpoints)
+# goes through the NAT gateway. The only way to reach a node is SSM Session
+# Manager — there is no ALB and no open ingress anywhere in this stack.
 #
 # CIDR layout — 10.0.0.0/24 split into four /26 blocks (64 addresses each):
-#   10.0.0.0/26   — public  us-east-2a  (ALB)
-#   10.0.0.64/26  — public  us-east-2b  (ALB)
-#   10.0.0.128/26 — private us-east-2a  (instances)
-#   10.0.0.192/26 — private us-east-2b  (instances)
+#   10.0.0.0/26   — public  us-east-2a  (NAT gateway)
+#   10.0.0.64/26  — public  us-east-2b  (spare / AZ symmetry)
+#   10.0.0.128/26 — private us-east-2a  (vuln-x86, patched-x86)
+#   10.0.0.192/26 — private us-east-2b  (safe-arm)
 # ================================================================================
 
 resource "aws_vpc" "main" {
   cidr_block = "10.0.0.0/24"
 
-  # DNS support and hostnames are required for the ALB to resolve instance
-  # targets by hostname and for SSM Session Manager to function if needed
+  # DNS support and hostnames are required for SSM Session Manager to function
   enable_dns_support   = true
   enable_dns_hostnames = true
 
   tags = { Name = "${local.name}-vpc" }
 }
 
-# The IGW is the VPC's on-ramp to the internet — without it, public subnets
-# have no path to or from the internet regardless of route table entries
+# The IGW is the VPC's on-ramp to the internet. Only the NAT gateway in the
+# public subnet uses it; the private nodes never touch it directly.
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
@@ -32,30 +33,25 @@ resource "aws_internet_gateway" "main" {
 
 # ================================================================================
 # Public Subnets
-# The ALB requires subnets in at least two AZs. If one AZ becomes unavailable,
-# the ALB continues serving traffic from the other. Instances are NOT placed
-# here — public subnets are for the ALB and NAT gateway only.
+# Two AZs for symmetry with the private tier. Only the NAT gateway sits here.
 # ================================================================================
 
 resource "aws_subnet" "public_a" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.0.0/26"
-  availability_zone = "us-east-2a"
-
-  # Auto-assign public IPs so the NAT gateway EIP association works correctly
-  # and the ALB receives a routable address in this AZ
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.0.0/26"
+  availability_zone       = "${var.region}a"
   map_public_ip_on_launch = true
 
-  tags = { Name = "${local.name}-public-us-east-2a" }
+  tags = { Name = "${local.name}-public-${var.region}a" }
 }
 
 resource "aws_subnet" "public_b" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.0.64/26"
-  availability_zone       = "us-east-2b"
+  availability_zone       = "${var.region}b"
   map_public_ip_on_launch = true
 
-  tags = { Name = "${local.name}-public-us-east-2b" }
+  tags = { Name = "${local.name}-public-${var.region}b" }
 }
 
 # All internet-bound traffic from public subnets exits through the IGW
@@ -82,17 +78,12 @@ resource "aws_route_table_association" "public_b" {
 
 # ================================================================================
 # NAT Gateway
-# Sits in a public subnet so it has internet access via the IGW. Private
-# instances route outbound traffic here for package installs and AWS API calls.
-# Inbound connections from the internet cannot be initiated through a NAT
-# gateway — it provides egress-only internet access.
-#
-# A single NAT gateway is sufficient for this demo. Production deployments
-# typically place one per AZ so private instances stay online if an AZ fails.
+# Sits in a public subnet with internet access via the IGW. The private nodes
+# route outbound traffic here to download Corretto and reach the SSM endpoints.
+# Inbound connections cannot be initiated through a NAT gateway — it is
+# egress-only, which is exactly what an intentionally-vulnerable lab wants.
 # ================================================================================
 
-# The EIP gives the NAT gateway a stable, predictable public IP. AWS will not
-# reassign this address unless the EIP is explicitly released.
 resource "aws_eip" "nat" {
   domain = "vpc"
 
@@ -105,41 +96,35 @@ resource "aws_nat_gateway" "main" {
 
   tags = { Name = "${local.name}-nat" }
 
-  # The IGW must exist before the NAT gateway can forward traffic to the
-  # internet — explicit dependency prevents a race condition during apply
+  # The IGW must exist before the NAT gateway can forward to the internet
   depends_on = [aws_internet_gateway.main]
 }
 
 # ================================================================================
 # Private Subnets
-# EC2 instances live here. No public IPs are assigned — all inbound traffic
-# arrives through the ALB, and all outbound traffic exits through the NAT
-# gateway. Instances are unreachable from the internet by design.
+# The three lab nodes live here. No public IPs; all egress via the NAT gateway.
+# Unreachable from the internet by design.
 # ================================================================================
 
 resource "aws_subnet" "private_a" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.0.128/26"
-  availability_zone = "us-east-2a"
-
-  # Explicitly false — instances in private subnets must never receive public
-  # IPs, even if someone launches one manually outside of Terraform
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.0.128/26"
+  availability_zone       = "${var.region}a"
   map_public_ip_on_launch = false
 
-  tags = { Name = "${local.name}-private-us-east-2a" }
+  tags = { Name = "${local.name}-private-${var.region}a" }
 }
 
 resource "aws_subnet" "private_b" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.0.192/26"
-  availability_zone       = "us-east-2b"
+  availability_zone       = "${var.region}b"
   map_public_ip_on_launch = false
 
-  tags = { Name = "${local.name}-private-us-east-2b" }
+  tags = { Name = "${local.name}-private-${var.region}b" }
 }
 
 # All internet-bound traffic from private subnets exits through the NAT gateway
-# rather than the IGW — the NAT gateway handles the public IP translation
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
 

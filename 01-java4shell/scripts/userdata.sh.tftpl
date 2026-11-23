@@ -1,0 +1,351 @@
+#!/bin/bash
+# ================================================================================
+# userdata.sh (rendered per node from userdata.sh.tftpl)
+# Runs once on first boot via cloud-init. Installs a pinned Amazon Corretto JDK,
+# stands up a minimal Base64-decode service (the realistic exposure surface for
+# CVE-2026-114938), computes this node's exposure verdict, serves it as a page,
+# and publishes it to SSM Inventory.
+#
+# Terraform substitutes the dollar-brace template values below at render time;
+# anything a shell variable needs is written doubled ($$) so it survives to the
+# instance and is expanded by bash there, not by Terraform.
+#
+# >>> This host is intentionally vulnerable by design. It lives in a private
+#     subnet with no inbound path and is reachable only via SSM. Do not deploy
+#     it to a production account or expose it to untrusted networks. <<<
+# ================================================================================
+
+exec > /root/userdata.log 2>&1
+set -x
+export DEBIAN_FRONTEND=noninteractive
+
+# ------------------------------------------------------------------------------
+# Baked-in node identity (from Terraform)
+# ------------------------------------------------------------------------------
+NODE_ROLE="${node_role}"
+JDK_URL="${jdk_url}"
+JDK_LABEL="${jdk_version}"
+EXPECTED="${expected_verdict}"
+EXPECTED_REASON="${expected_reason}"
+AFFECTED_VERSION="${affected_version}"
+FIXED_VERSION="${fixed_version}"
+DECODER_PORT="${decoder_port}"
+REGION="${region}"
+DEPLOYMENT="${deployment_name}"
+
+APPDIR=/opt/java4shell
+mkdir -p "$${APPDIR}"
+
+# ------------------------------------------------------------------------------
+# Packages
+# ForceIPv4: arm64 pulls from ports.ubuntu.com, whose AAAA records resolve on
+# instances with no IPv6, costing failed attempts per repo before IPv4 fallback.
+# awscli is needed for `aws ssm put-inventory`; jq builds that call's JSON;
+# apache2 serves the verdict page (localhost / SSM-tunnel only).
+# ------------------------------------------------------------------------------
+echo "NOTE: installing packages..."
+apt-get -o Acquire::ForceIPv4=true update -y
+apt-get -o Acquire::ForceIPv4=true install -y apache2 awscli jq curl ca-certificates tar
+
+# ------------------------------------------------------------------------------
+# IMDSv2 — identity for the inventory call
+# ------------------------------------------------------------------------------
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+IID=$(curl -s -H "X-aws-ec2-metadata-token: $${TOKEN}" \
+  http://169.254.169.254/latest/meta-data/instance-id)
+ITYPE=$(curl -s -H "X-aws-ec2-metadata-token: $${TOKEN}" \
+  http://169.254.169.254/latest/meta-data/instance-type)
+AZ=$(curl -s -H "X-aws-ec2-metadata-token: $${TOKEN}" \
+  http://169.254.169.254/latest/meta-data/placement/availability-zone)
+
+# ------------------------------------------------------------------------------
+# Install the pinned Corretto JDK
+# The vulnerable build may have been pulled from the public archive — if the
+# download fails, we DO NOT abort. The node stays up and reachable over SSM and
+# its verdict reads "JDK INSTALL FAILED", never a misleading "not exposed".
+# ------------------------------------------------------------------------------
+echo "NOTE: downloading Corretto from $${JDK_URL}"
+JDK_OK=true
+if curl -fL --retry 4 --retry-delay 5 -o /tmp/corretto.tar.gz "$${JDK_URL}"; then
+  JDK_TOPDIR=$(tar tzf /tmp/corretto.tar.gz | head -1 | cut -d/ -f1)
+  tar xzf /tmp/corretto.tar.gz -C /opt
+  ln -sfn "/opt/$${JDK_TOPDIR}" "$${APPDIR}/jdk"
+  echo "NOTE: installed $${JDK_TOPDIR}"
+else
+  JDK_OK=false
+  echo "ERROR: Corretto download failed from $${JDK_URL}"
+  echo "ERROR: verify the affected build string / URL in variables.tf (it may be pulled)."
+fi
+echo "$${JDK_OK}" > "$${APPDIR}/jdk_ok"
+
+# ------------------------------------------------------------------------------
+# Sample Base64 decode service — the exposure surface
+# A normal application endpoint that Base64-decodes caller-supplied input, the
+# way real services decode JWTs, basic-auth headers and encoded parameters. It
+# does nothing with the decoded bytes but report their length: no exec, no
+# deserialization. The CVE-2026-114938 fault is in the JDK's AVX-512 decode
+# intrinsic that this call exercises on a vulnerable build — it is NOT
+# reproduced here, and no exploit payload lives in this repo. Your PoC supplies
+# the malicious input; this app is just the door it knocks on.
+# ------------------------------------------------------------------------------
+cat > "$${APPDIR}/Decoder.java" <<'JAVA_EOF'
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
+public class Decoder {
+    public static void main(String[] args) throws Exception {
+        int port = Integer.parseInt(System.getenv().getOrDefault("DECODER_PORT", "8080"));
+        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+        server.createContext("/", Decoder::handle);
+        server.setExecutor(null);
+        server.start();
+        System.out.println("java4shell decoder listening on " + port);
+    }
+
+    private static void handle(HttpExchange ex) throws Exception {
+        String data = null;
+        String q = ex.getRequestURI().getRawQuery();
+        if (q != null) {
+            for (String kv : q.split("&")) {
+                String[] p = kv.split("=", 2);
+                if (p.length == 2 && p[0].equals("data")) {
+                    data = URLDecoder.decode(p[1], StandardCharsets.UTF_8);
+                }
+            }
+        }
+        if (data == null) {
+            byte[] body = ex.getRequestBody().readAllBytes();
+            if (body.length > 0) data = new String(body, StandardCharsets.UTF_8).trim();
+        }
+
+        int code = 200;
+        String out;
+        if (data == null || data.isEmpty()) {
+            out = "usage: GET /?data=<base64>  or  POST the base64 string as the body\n";
+        } else {
+            try {
+                // The vulnerable path. On a fixed JDK or a non-AVX-512-VBMI CPU
+                // this is an ordinary decode; nothing here is exploit-specific.
+                byte[] decoded = Base64.getDecoder().decode(data);
+                out = "decoded " + decoded.length + " bytes\n";
+            } catch (IllegalArgumentException e) {
+                code = 400;
+                out = "invalid base64: " + e.getMessage() + "\n";
+            }
+        }
+        byte[] resp = out.getBytes(StandardCharsets.UTF_8);
+        ex.sendResponseHeaders(code, resp.length);
+        try (OutputStream os = ex.getResponseBody()) { os.write(resp); }
+    }
+}
+JAVA_EOF
+
+# ------------------------------------------------------------------------------
+# systemd unit for the decoder
+# The vuln node runs the JVM with NO mitigation so it is genuinely exposed.
+# The temporary pre-upgrade workarounds for CVE-2026-114938 are documented here;
+# patch.sh applies the real fix (the 21.0.13.1 upgrade) rather than a flag.
+#
+#   Researcher / Red Hat RHSB-2026-018 stopgaps (either disables the vulnerable
+#   AVX-512 Base64 intrinsic):
+#     -XX:+UnlockDiagnosticVMOptions -XX:-UseBASE64Intrinsics
+#        (UseBASE64Intrinsics is a diagnostic flag, so it must be unlocked first)
+#     -XX:UseAVX=2
+#        (keeps the AVX2 path, drops AVX-512; x86-only, may be rejected on ARM)
+#   Both are stopgaps only — Oracle's guidance is to upgrade.
+# ------------------------------------------------------------------------------
+cat > /etc/systemd/system/java4shell-decoder.service <<'UNIT_EOF'
+[Unit]
+Description=Java4Shell sample Base64 decode service (intentional exposure surface)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=DECODER_PORT=__DECODER_PORT__
+ExecStart=/opt/java4shell/jdk/bin/java /opt/java4shell/Decoder.java
+# Pre-upgrade mitigation (leave commented so the vuln node stays exposed):
+# ExecStart=/opt/java4shell/jdk/bin/java -XX:+UnlockDiagnosticVMOptions -XX:-UseBASE64Intrinsics /opt/java4shell/Decoder.java
+# ExecStart=/opt/java4shell/jdk/bin/java -XX:UseAVX=2 /opt/java4shell/Decoder.java
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+# Bake the port in (kept out of the quoted heredoc above so it stays literal)
+sed -i "s|__DECODER_PORT__|$${DECODER_PORT}|" /etc/systemd/system/java4shell-decoder.service
+
+# ------------------------------------------------------------------------------
+# exposure-check.sh — the single source of verdict truth, run at boot and again
+# by check-exposure.sh / patch.sh / validate.sh (over SSM). Writing it to the
+# box keeps the logic identical whether it runs now or later.
+# ------------------------------------------------------------------------------
+cat > "$${APPDIR}/exposure-check.sh" <<'EXPOSURE_EOF'
+#!/bin/bash
+# Computes this node's CVE-2026-114938 exposure verdict, writes the verdict page
+# and verdict.json, and publishes a Custom:Java4Shell SSM Inventory entry.
+set -uo pipefail
+
+NODE_ROLE="${node_role}"
+EXPECTED="${expected_verdict}"
+EXPECTED_REASON="${expected_reason}"
+FIXED_VERSION="${fixed_version}"
+DEPLOYMENT="${deployment_name}"
+REGION="${region}"
+APPDIR=/opt/java4shell
+JAVA="$${APPDIR}/jdk/bin/java"
+
+# --- Java version actually installed ---
+if [ -x "$${JAVA}" ] && [ "$(cat $${APPDIR}/jdk_ok 2>/dev/null)" = "true" ]; then
+  RAW=$("$${JAVA}" -version 2>&1)
+  # The quoted token is the upstream OpenJDK version (e.g. 21.0.13 or 21.0.13.1),
+  # which is vendor-independent and what the fix threshold is expressed in.
+  VER=$(printf '%s\n' "$${RAW}" | head -1 | sed -E 's/.*"([0-9][0-9._]*)".*/\1/')
+else
+  RAW="(no JDK installed)"
+  VER="none"
+fi
+
+# --- CPU capability: the AVX-512 VBMI intrinsic the bug lives in ---
+# The Linux cpuinfo flag is "avx512vbmi" (no underscore) on current kernels; the
+# underscored "avx512_vbmi2" is a DIFFERENT feature (VBMI2) and must not match.
+# -w keeps avx512vbmi from matching inside avx512_vbmi2, and the alternation
+# tolerates kernels that spell the base feature with an underscore.
+if grep -qiwE 'avx512vbmi|avx512_vbmi' /proc/cpuinfo; then VBMI="yes"; else VBMI="no"; fi
+ARCH=$(uname -m)
+
+# --- Is the running decoder mitigated by a JVM flag? ---
+MIT="no"
+if pgrep -af 'java .*Decoder.java' 2>/dev/null | grep -qiE 'UseBASE64Intrinsics|UseAVX=2'; then
+  MIT="yes"
+fi
+
+# --- Verdict ---
+# EXPOSED only when all three hold: a vulnerable JDK, an AVX-512 VBMI CPU, and
+# no mitigation flag. Patched JDK or missing intrinsic => safe outright.
+if [ "$${VER}" = "none" ]; then
+  VERDICT="UNKNOWN"
+  REASON="JDK install failed — verify the affected Corretto build URL (it may be pulled)"
+elif dpkg --compare-versions "$${VER}" ge "$${FIXED_VERSION}"; then
+  VERDICT="NOT_EXPOSED"
+  REASON="JDK is patched ($${VER} >= $${FIXED_VERSION})"
+elif [ "$${VBMI}" = "no" ]; then
+  VERDICT="NOT_EXPOSED"
+  REASON="CPU has no AVX-512 VBMI — the vulnerable Base64 intrinsic is never used ($${ARCH})"
+elif [ "$${MIT}" = "yes" ]; then
+  VERDICT="MITIGATED"
+  REASON="vulnerable JDK on a VBMI CPU, but the intrinsic is disabled by a JVM flag (stopgap)"
+else
+  VERDICT="EXPOSED"
+  REASON="vulnerable JDK ($${VER}) on an AVX-512 VBMI CPU, intrinsic active"
+fi
+
+# --- Colour for the page ---
+case "$${VERDICT}" in
+  EXPOSED)     COLOR="#ff5c57"; GLYPH="&#x26A0;" ;;
+  NOT_EXPOSED) COLOR="#2ec28a"; GLYPH="&#x2714;" ;;
+  MITIGATED)   COLOR="#f2c163"; GLYPH="&#x1F6E1;" ;;
+  *)           COLOR="#8b949e"; GLYPH="&#x3F;" ;;
+esac
+
+# --- verdict.json (for scripts) ---
+cat > /var/www/html/verdict.json <<JSON
+{"role":"$${NODE_ROLE}","deployment":"$${DEPLOYMENT}","java_version":"$${VER}","arch":"$${ARCH}","avx512_vbmi":"$${VBMI}","mitigated":"$${MIT}","verdict":"$${VERDICT}","expected":"$${EXPECTED}","reason":"$${REASON}"}
+JSON
+
+# --- verdict page (reachable via SSM port-forward to :80) ---
+cat > /var/www/html/index.html <<HTML
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Java4Shell — $${NODE_ROLE}</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0d1117;font-family:-apple-system,'Segoe UI',Arial,sans-serif;
+       min-height:100vh;display:flex;align-items:center;justify-content:center}
+  .card{background:#161b22;border-radius:8px;border-top:4px solid $${COLOR};
+        padding:40px 44px;width:560px;box-shadow:0 12px 40px rgba(0,0,0,.6)}
+  .tag{display:inline-block;background:#21262d;color:#8b949e;font-size:11px;
+       letter-spacing:1.5px;text-transform:uppercase;padding:4px 9px;border-radius:3px}
+  .verdict{color:$${COLOR};font-size:34px;font-weight:700;margin:22px 0 2px}
+  .reason{color:#adbac7;font-size:14px;margin-bottom:26px}
+  table{width:100%;border-collapse:collapse}
+  tr{border-bottom:1px solid #21262d} tr:last-child{border-bottom:none}
+  td{padding:12px 0} .l{color:#6b7a90;font-size:11px;letter-spacing:1.2px;
+     text-transform:uppercase;width:46%} .v{color:#e6edf3;font-family:'Courier New',monospace;
+     font-size:14px;text-align:right}
+  .foot{margin-top:26px;padding-top:18px;border-top:1px solid #21262d;text-align:center;
+        color:#3a4a5a;font-size:10px;letter-spacing:2px;text-transform:uppercase}
+</style></head><body><div class="card">
+  <span class="tag">CVE-2026-114938 &bull; Java4Shell</span>
+  <div class="verdict">$${GLYPH} $${VERDICT}</div>
+  <div class="reason">$${REASON}</div>
+  <table>
+    <tr><td class="l">Node</td><td class="v">$${NODE_ROLE}</td></tr>
+    <tr><td class="l">Java version</td><td class="v">$${VER}</td></tr>
+    <tr><td class="l">Architecture</td><td class="v">$${ARCH}</td></tr>
+    <tr><td class="l">AVX-512 VBMI</td><td class="v">$${VBMI}</td></tr>
+    <tr><td class="l">Mitigation flag</td><td class="v">$${MIT}</td></tr>
+    <tr><td class="l">Expected verdict</td><td class="v">$${EXPECTED}</td></tr>
+  </table>
+  <div class="foot">$${DEPLOYMENT} &bull; intentionally vulnerable lab</div>
+</div></body></html>
+HTML
+
+# --- publish to SSM Inventory (Custom:Java4Shell) ---
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+IID=$(curl -s -H "X-aws-ec2-metadata-token: $${TOKEN}" \
+  http://169.254.169.254/latest/meta-data/instance-id)
+CAPTURE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+ITEMS=$(jq -nc \
+  --arg t "$${CAPTURE}" --arg role "$${NODE_ROLE}" --arg ver "$${VER}" \
+  --arg arch "$${ARCH}" --arg vbmi "$${VBMI}" --arg mit "$${MIT}" \
+  --arg verdict "$${VERDICT}" --arg dep "$${DEPLOYMENT}" --arg reason "$${REASON}" \
+  '[{TypeName:"Custom:Java4Shell",SchemaVersion:"1.0",CaptureTime:$t,
+     Content:[{NodeRole:$role,JavaVersion:$ver,Arch:$arch,Avx512Vbmi:$vbmi,
+               Mitigated:$mit,Verdict:$verdict,Deployment:$dep,Reason:$reason}]}]')
+aws ssm put-inventory --region "$${REGION}" --instance-id "$${IID}" --items "$${ITEMS}" \
+  && echo "NOTE: published Custom:Java4Shell inventory for $${IID}" \
+  || echo "WARN: put-inventory failed (verdict page is still authoritative)"
+
+# --- machine-readable summary for Run Command callers ---
+echo "ROLE=$${NODE_ROLE}"
+echo "JAVA_VERSION=$${VER}"
+echo "ARCH=$${ARCH}"
+echo "AVX512_VBMI=$${VBMI}"
+echo "MITIGATED=$${MIT}"
+echo "VERDICT=$${VERDICT}"
+echo "EXPECTED=$${EXPECTED}"
+echo "REASON=$${REASON}"
+EXPOSURE_EOF
+chmod +x "$${APPDIR}/exposure-check.sh"
+
+# ------------------------------------------------------------------------------
+# Start services
+# ------------------------------------------------------------------------------
+systemctl daemon-reload
+systemctl enable apache2
+systemctl restart apache2
+
+if [ "$${JDK_OK}" = "true" ]; then
+  echo "NOTE: starting decoder service..."
+  systemctl enable java4shell-decoder
+  systemctl restart java4shell-decoder
+else
+  echo "WARN: skipping decoder start — no JDK."
+fi
+
+# Compute and publish the first verdict
+echo "NOTE: computing initial exposure verdict..."
+"$${APPDIR}/exposure-check.sh" || true
+
+echo "NOTE: userdata complete for node $${NODE_ROLE}."

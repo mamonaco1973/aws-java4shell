@@ -3,16 +3,14 @@ set -euo pipefail
 
 # ================================================================================
 # Environment Check
-# Validates required tools are installed and AWS credentials are active
+# Validates required tools are installed and AWS credentials are active. This lab
+# drives the nodes entirely over SSM, so jq is required (the operator scripts
+# build SSM payloads and parse JSON output with it).
 # ================================================================================
-
-# ------------------------------------------------------------------------------
-# Tool Checks
-# ------------------------------------------------------------------------------
 
 echo "NOTE: Validating that required commands are found in your PATH."
 
-for cmd in aws terraform; do
+for cmd in aws terraform jq; do
   if ! command -v "$cmd" &>/dev/null; then
     echo "ERROR: $cmd is not found in PATH."
     exit 1
