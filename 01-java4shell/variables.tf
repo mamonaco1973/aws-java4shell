@@ -13,17 +13,28 @@ variable "region" {
 }
 
 # --------------------------------------------------------------------------------
-# Instance types
-# vuln-x86 and patched-x86 use c7i (Intel Sapphire Rapids) because it exposes
-# AVX-512 VBMI — the CPU feature the vulnerable Base64 intrinsic needs. safe-arm
-# uses t4g (Graviton2, ARM64), which has no such instruction set, so it is
-# immune by hardware regardless of the Java version installed.
+# Instance types — the lab turns on the CPU distinction, so these are chosen
+# deliberately:
+#   x86_instance_type        c7i (Sapphire Rapids) — HAS AVX-512 VBMI, so the
+#                            vulnerable intrinsic can run. The floor for VBMI is
+#                            a .large; c6i.large (Ice Lake) is a cheaper swap.
+#   intel_novbmi_instance_type  t3 (Skylake/Cascade Lake) — x86 but NO VBMI, so
+#                            it is immune by HARDWARE despite being Intel. This
+#                            is the whole point of the safe-intel node: not all
+#                            x86 is affected, only the chips with the instruction.
+#   arm_instance_type        t4g (Graviton2, ARM64) — no AVX-512 at all, immune.
 # --------------------------------------------------------------------------------
 
 variable "x86_instance_type" {
-  description = "Instance type for the x86-64 nodes (must support AVX-512 VBMI, e.g. c7i)"
+  description = "x86-64 nodes that MUST support AVX-512 VBMI (c7i / c6i / m6i / c7a)"
   type        = string
   default     = "c7i.large"
+}
+
+variable "intel_novbmi_instance_type" {
+  description = "Intel x86 node WITHOUT AVX-512 VBMI (t3), to prove not all x86 is affected"
+  type        = string
+  default     = "t3.micro"
 }
 
 variable "arm_instance_type" {
@@ -81,6 +92,22 @@ variable "corretto_affected_url_override" {
   description = "If non-empty, used verbatim as the affected x64 JDK URL instead of the derived Corretto URL"
   type        = string
   default     = ""
+}
+
+# A SECOND affected train, to prove the detector is not hardcoded to Java 21.
+# The vuln-jdk17 node installs an affected Corretto 17 (any build below the fix
+# 17.0.21.1) on a VBMI CPU, so it must come back EXPOSED by the 17 threshold.
+# Verify this build still returns HTTP 200 before apply, as with the 21 build.
+variable "corretto_jdk17_build" {
+  description = "Corretto 17 build string for the affected Java 17 node (reports < 17.0.21.1)"
+  type        = string
+  default     = "17.0.13.11.1"
+}
+
+variable "jdk17_version" {
+  description = "Upstream version the affected Corretto 17 build reports"
+  type        = string
+  default     = "17.0.13"
 }
 
 # --------------------------------------------------------------------------------

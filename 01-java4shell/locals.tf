@@ -26,12 +26,13 @@ locals {
   affected_x64_derived = "${local.corretto_base}/${var.corretto_affected_build}/amazon-corretto-${var.corretto_affected_build}-linux-x64.tar.gz"
   affected_arm_derived = "${local.corretto_base}/${var.corretto_affected_build}/amazon-corretto-${var.corretto_affected_build}-linux-aarch64.tar.gz"
   fixed_x64_url        = "${local.corretto_base}/${var.corretto_fixed_build}/amazon-corretto-${var.corretto_fixed_build}-linux-x64.tar.gz"
+  jdk17_x64_url        = "${local.corretto_base}/${var.corretto_jdk17_build}/amazon-corretto-${var.corretto_jdk17_build}-linux-x64.tar.gz"
 
   # Allow a self-hosted override for the (often-pulled) vulnerable x64 build.
   affected_x64_url = var.corretto_affected_url_override != "" ? var.corretto_affected_url_override : local.affected_x64_derived
 
   # ------------------------------------------------------------------------------
-  # Node definitions — the one place that describes all three machines.
+  # Node definitions — the one place that describes every machine.
   # instances.tf iterates this map, and each node's userdata is rendered from
   # the shared template with these values. "expected" is the verdict the lab is
   # designed to produce, so validate.sh can assert reality against intent.
@@ -75,6 +76,32 @@ locals {
       jdk_version = var.fixed_version
       expected    = "NOT_EXPOSED"
       reason      = "AVX-512 VBMI CPU, but the JDK carries the 21.0.13.1 fix"
+    }
+    # x86, same vulnerable Java as vuln-x86 — but an OLDER Intel chip with no
+    # AVX-512 VBMI, so it is immune by hardware. Proves "not all x86", only the
+    # chips that carry the instruction.
+    "safe-intel" = {
+      role        = "safe-intel"
+      ami         = data.aws_ami.ubuntu_x86.id
+      instance    = var.intel_novbmi_instance_type
+      subnet      = aws_subnet.private_a.id
+      jdk_url     = local.affected_x64_url
+      jdk_version = var.affected_version
+      expected    = "NOT_EXPOSED"
+      reason      = "x86, but this Intel chip has no AVX-512 VBMI instruction"
+    }
+    # A SECOND affected train on a VBMI CPU: vulnerable Java 17, which must come
+    # back EXPOSED by the 17 threshold (17.0.21.1), proving the detector is not
+    # hardcoded to the 21 line.
+    "vuln-jdk17" = {
+      role        = "vuln-jdk17"
+      ami         = data.aws_ami.ubuntu_x86.id
+      instance    = var.x86_instance_type
+      subnet      = aws_subnet.private_a.id
+      jdk_url     = local.jdk17_x64_url
+      jdk_version = var.jdk17_version
+      expected    = "EXPOSED"
+      reason      = "vulnerable Java 17 on an AVX-512 VBMI CPU (a second affected train)"
     }
   }
 }
