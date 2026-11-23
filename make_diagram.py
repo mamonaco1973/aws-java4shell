@@ -6,7 +6,7 @@ from inline SVG, so a `prefers-color-scheme` media query inside the document is
 silently dropped. The README pairs them with <picture>, which GitHub honours.
 
 A README diagram is studied, not narrated, so it is COMPLETE rather than
-minimal: the operator and PoC, the SSM plane that is the only way in, all three
+minimal: the operator and PoC, the SSM plane that is the only way in, all five
 lab nodes with the verdict each is built to produce, the NAT gateway the nodes
 reach out through, and the Corretto archive the pinned JDKs come from.
 Run:  python3 make_diagram.py
@@ -19,12 +19,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # ------------------------------------------------------------------------------
 # Geometry and style (shared with the other projects' diagrams)
 # ------------------------------------------------------------------------------
-NW, NH = 420, 110                          # node width, height
-GUTTER = 140                               # between columns: room for a label
-MARGIN = 40
-COL = [MARGIN + i * (NW + GUTTER) for i in range(3)]
+NW, NH = 384, 104                          # node width, height
+GUTTER = 56                                # between the five node columns
+MARGIN = 44
+COL = [MARGIN + i * (NW + GUTTER) for i in range(5)]
 ROW = [40 + i * 200 for i in range(4)]
-W = MARGIN * 2 + NW * 3 + GUTTER * 2
+W = MARGIN * 2 + NW * 5 + GUTTER * 4
 H = ROW[-1] + NH + 40
 TITLE_PX, SUB_PX, EDGE_PX = 26, 17, 16
 
@@ -95,37 +95,50 @@ def gutter_y(r):
 # id: (x, y, colour key, icon, title, subtitle[, "dashed"])
 # ------------------------------------------------------------------------------
 NODES.update({
-    "op":      (COL[1], ROW[0], "navy", "terminal", "Operator + PoC",
-                "AWS CLI, and your calif.io PoC"),
-    "ssm":     (COL[1], ROW[1], "purple", "key", "AWS SSM",
-                "Session Manager / Run Command / Inventory"),
-    "vuln":    (COL[0], ROW[2], "danger", "cpu", "vuln-jdk21",
-                "c7i x86 / Corretto 21.0.13 / EXPOSED"),
-    "arm":     (COL[1], ROW[2], "store", "shield", "safe-arm",
-                "t4g ARM64 / 21.0.13 / immune, no VBMI"),
-    "patched": (COL[2], ROW[2], "store", "shield", "patched-x86",
-                "c7i x86 / Corretto 21.0.13.1 / patched"),
-    "nat":     (COL[1], ROW[3], "navy", "network", "NAT gateway",
-                "egress only - no inbound path exists"),
-    "corretto": (COL[2], ROW[3], "local", "database", "Corretto archive",
+    "op":    (COL[2], ROW[0], "navy", "terminal", "Operator + PoC",
+              "AWS CLI, and your calif.io PoC"),
+    "ssm":   (COL[2], ROW[1], "purple", "key", "AWS SSM",
+              "Session Manager / Run Command / Inventory"),
+    # Three EXPOSED nodes — same vulnerable intrinsic, three affected Java trains.
+    "v21":   (COL[0], ROW[2], "danger", "cpu", "vuln-jdk21",
+              "c7i x86 . 21.0.13 . EXPOSED"),
+    "v17":   (COL[1], ROW[2], "danger", "cpu", "vuln-jdk17",
+              "c7i x86 . 17.0.21 . EXPOSED"),
+    "v25":   (COL[2], ROW[2], "danger", "cpu", "vuln-jdk25",
+              "c7i x86 . 25.0.5 . EXPOSED"),
+    # Two immune nodes — same vulnerable Java, but no AVX-512 VBMI to fire it.
+    "arm":   (COL[3], ROW[2], "store", "shield", "safe-arm",
+              "t4g ARM64 . no VBMI . safe"),
+    "intel": (COL[4], ROW[2], "store", "cpu", "safe-intel",
+              "t3 x86 . no VBMI . safe"),
+    "nat":   (COL[2], ROW[3], "navy", "network", "NAT gateway",
+              "egress only - no inbound path exists"),
+    "corretto": (COL[4], ROW[3], "local", "database", "Corretto archive",
                  "pinned JDK tarballs (verify vuln build)", "dashed"),
 })
 
-op, ssm, vuln, arm = _r("op"), _r("ssm"), _r("vuln"), _r("arm")
-patched, nat, cor = _r("patched"), _r("nat"), _r("corretto")
+op, ssm = _r("op"), _r("ssm")
+v21, v17, v25 = _r("v21"), _r("v17"), _r("v25")
+arm, intel = _r("arm"), _r("intel")
+nat, cor = _r("nat"), _r("corretto")
 
 # id: (path, colour key, label, label_x, label_y, anchor[, "dashed"])
 EDGES = {
     "e_in":   (f"M{op[4]},{op[3]} V{ssm[1] - 5}", "purple",
                "SSM only", op[4] + 14, gutter_y(0) + 6, "start"),
-    "e_arm":  (f"M{ssm[4]},{ssm[3]} V{arm[1] - 5}", "purple",
+    # SSM fans out to all five nodes; the centre edge carries the label.
+    "e_v25":  (f"M{ssm[4]},{ssm[3]} V{v25[1] - 5}", "purple",
                "exec . verdict", ssm[4] + 14, gutter_y(1) + 6, "start"),
-    "e_vuln": (f"M{ssm[4]},{ssm[3]} L{vuln[4]},{vuln[1] - 5}", "purple",
+    "e_v21":  (f"M{ssm[4]},{ssm[3]} L{v21[4]},{v21[1] - 5}", "purple",
                "", 0, 0, "middle"),
-    "e_pat":  (f"M{ssm[4]},{ssm[3]} L{patched[4]},{patched[1] - 5}", "purple",
+    "e_v17":  (f"M{ssm[4]},{ssm[3]} L{v17[4]},{v17[1] - 5}", "purple",
                "", 0, 0, "middle"),
-    "e_eg":   (f"M{arm[4]},{arm[3]} V{nat[1] - 5}", "line",
-               "egress", arm[4] + 14, gutter_y(2) + 6, "start"),
+    "e_arm":  (f"M{ssm[4]},{ssm[3]} L{arm[4]},{arm[1] - 5}", "purple",
+               "", 0, 0, "middle"),
+    "e_intel": (f"M{ssm[4]},{ssm[3]} L{intel[4]},{intel[1] - 5}", "purple",
+                "", 0, 0, "middle"),
+    "e_eg":   (f"M{v25[4]},{v25[3]} V{nat[1] - 5}", "line",
+               "egress", v25[4] + 14, gutter_y(2) + 6, "start"),
     "e_dl":   (f"M{nat[2]},{nat[5]} H{cor[0] - 5}", "local",
                "JDK pull", (nat[2] + cor[0]) / 2, nat[5] - 12, "middle", "dashed"),
 }
@@ -133,14 +146,16 @@ EDGES = {
 ALT = ("The operator, running the AWS CLI and the public calif.io proof of "
        "concept, reaches the lab only through AWS SSM - Session Manager, Run "
        "Command and Inventory - because the nodes have no inbound network path. "
-       "SSM drives three nodes in private subnets: vuln-jdk21, a c7i x86 instance "
-       "running the vulnerable Corretto 21.0.13 on an AVX-512 VBMI CPU, which is "
-       "EXPOSED; safe-arm, a t4g Graviton ARM64 instance on the same vulnerable "
-       "Java that is immune because ARM has no VBMI intrinsic; and patched-x86, "
-       "a c7i x86 instance on the fixed Corretto 21.0.13.1. The nodes reach out "
-       "through a NAT gateway, egress only, to pull their pinned JDK tarballs "
-       "from the Amazon Corretto archive. Each node publishes its verdict to SSM "
-       "Inventory.")
+       "SSM drives five nodes in private subnets. Three are EXPOSED: vuln-jdk21, "
+       "vuln-jdk17 and vuln-jdk25, all c7i x86 instances running the same "
+       "vulnerable AVX-512 VBMI intrinsic on three different affected Java trains "
+       "(Corretto 21.0.13, 17.0.21 and 25.0.5). Two are immune even though they "
+       "run the same vulnerable Java: safe-arm, a t4g Graviton ARM64 instance, "
+       "and safe-intel, a t3 x86 instance - neither has AVX-512 VBMI, so the bug "
+       "cannot fire. There is no pre-patched node; patch.sh flips a vulnerable "
+       "node live. The nodes egress through a NAT gateway to pull pinned JDK "
+       "tarballs from the Amazon Corretto archive, and each publishes its verdict "
+       "to SSM Inventory.")
 
 # ------------------------------------------------------------------------------
 # Rendering
