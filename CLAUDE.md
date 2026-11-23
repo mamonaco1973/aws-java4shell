@@ -30,10 +30,12 @@ Single Terraform phase in `01-java4shell/`. No modules, no workspaces, no ALB,
 no ASG, no CloudWatch (dropped from the aws-autoscaling seed).
 
 - **Region:** us-east-2 (var.region)
-- **Nodes:** `vuln-jdk21` (c7i.large, Corretto 21.0.13, EXPOSED), `safe-arm`
-  (t4g.micro, Corretto 21.0.13, immune — no VBMI), `patched-x86` (c7i.large,
-  Corretto 21.0.13.1, patched). Defined once in `locals.tf` → `local.nodes`.
-- **OS:** Ubuntu 24.04 LTS — amd64 for the c7i nodes, arm64 for the t4g node
+- **Nodes:** `vuln-jdk21` / `vuln-jdk17` / `vuln-jdk25` (c7i.large, EXPOSED
+  across three affected trains), `safe-arm` (t4g.micro, immune — ARM),
+  `safe-intel` (t3.micro, immune — x86 without VBMI). No pre-patched node;
+  `patch.sh` flips a vuln node live. Defined once in `locals.tf` →
+  `local.nodes`.
+- **OS:** Ubuntu 24.04 LTS — amd64 for the c7i/t3 nodes, arm64 for the t4g node
   (two AMI data sources in `main.tf`).
 - **Access:** SSM only — private subnets, no public IP, no SSH, egress-only SG.
 - **Exposure surface:** a minimal Java Base64-decode HTTP service

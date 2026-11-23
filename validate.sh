@@ -5,7 +5,6 @@
 # match the verdict it was designed to produce (locals.tf -> node_expected).
 #   vuln-jdk21     EXPOSED       (vulnerable JDK + AVX-512 VBMI CPU)
 #   safe-arm     NOT_EXPOSED   (same JDK, but ARM64 has no VBMI intrinsic)
-#   patched-x86  NOT_EXPOSED   (VBMI CPU, but JDK carries the 21.0.13.1 fix)
 # ===============================================================================
 
 set -uo pipefail
