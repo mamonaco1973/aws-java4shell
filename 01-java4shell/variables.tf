@@ -94,20 +94,50 @@ variable "corretto_affected_url_override" {
   default     = ""
 }
 
-# A SECOND affected train, to prove the detector is not hardcoded to Java 21.
-# The vuln-jdk17 node installs an affected Corretto 17 (any build below the fix
-# 17.0.21.1) on a VBMI CPU, so it must come back EXPOSED by the 17 threshold.
-# Verify this build still returns HTTP 200 before apply, as with the 21 build.
+# A SECOND affected train, to prove the detector is not hardcoded to Java 21 and
+# that patch.sh upgrades each train to ITS OWN fix. Oracle patched 17 alongside
+# 21/25/27 on 2026-11-17: the fix is 17.0.21.1 (Corretto 17.0.21.1.2), and the
+# last affected build is 17.0.21.0.3 (upstream 17.0.21). Verify both URLs return
+# HTTP 200 before apply, as with the 21 builds. Sources: watchTowr, Cycode,
+# TuxCare write-ups on CVE-2026-114938 (not primary Oracle/OpenJDK advisories).
 variable "corretto_jdk17_build" {
-  description = "Corretto 17 build string for the affected Java 17 node (reports < 17.0.21.1)"
+  description = "Corretto 17 build for the AFFECTED Java 17 node (reports 17.0.21, below the fix)"
   type        = string
-  default     = "17.0.13.11.1"
+  default     = "17.0.21.0.3"
 }
 
 variable "jdk17_version" {
   description = "Upstream version the affected Corretto 17 build reports"
   type        = string
-  default     = "17.0.13"
+  default     = "17.0.21"
+}
+
+variable "corretto_jdk17_fixed_build" {
+  description = "Corretto 17 build patch.sh upgrades vuln-jdk17 to (reports upstream 17.0.21.1)"
+  type        = string
+  default     = "17.0.21.1.2"
+}
+
+# A THIRD affected train: Java 25 (current LTS). Affected through 25.0.5.0.10
+# (upstream 25.0.5); fixed in Corretto 25.0.5.1.2 (upstream 25.0.5.1) per
+# Corretto's own changelog. Java 27 is deliberately omitted: it is not released
+# until Sep 2027, so there is no build to install (the detector still covers it).
+variable "corretto_jdk25_build" {
+  description = "Corretto 25 build for the AFFECTED Java 25 node (reports 25.0.5, below the fix)"
+  type        = string
+  default     = "25.0.5.0.10"
+}
+
+variable "jdk25_version" {
+  description = "Upstream version the affected Corretto 25 build reports"
+  type        = string
+  default     = "25.0.5"
+}
+
+variable "corretto_jdk25_fixed_build" {
+  description = "Corretto 25 build patch.sh upgrades vuln-jdk25 to (reports upstream 25.0.5.1)"
+  type        = string
+  default     = "25.0.5.1.2"
 }
 
 # --------------------------------------------------------------------------------

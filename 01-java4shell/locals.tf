@@ -27,6 +27,18 @@ locals {
   affected_arm_derived = "${local.corretto_base}/${var.corretto_affected_build}/amazon-corretto-${var.corretto_affected_build}-linux-aarch64.tar.gz"
   fixed_x64_url        = "${local.corretto_base}/${var.corretto_fixed_build}/amazon-corretto-${var.corretto_fixed_build}-linux-x64.tar.gz"
   jdk17_x64_url        = "${local.corretto_base}/${var.corretto_jdk17_build}/amazon-corretto-${var.corretto_jdk17_build}-linux-x64.tar.gz"
+  jdk17_fixed_x64_url  = "${local.corretto_base}/${var.corretto_jdk17_fixed_build}/amazon-corretto-${var.corretto_jdk17_fixed_build}-linux-x64.tar.gz"
+  jdk25_x64_url        = "${local.corretto_base}/${var.corretto_jdk25_build}/amazon-corretto-${var.corretto_jdk25_build}-linux-x64.tar.gz"
+  jdk25_fixed_x64_url  = "${local.corretto_base}/${var.corretto_jdk25_fixed_build}/amazon-corretto-${var.corretto_jdk25_fixed_build}-linux-x64.tar.gz"
+
+  # Each affected node and the fixed build patch.sh upgrades IT to — its own
+  # train's fix, so patching 17 installs 17.0.21.1, 21 installs 21.0.13.1, and
+  # 25 installs 25.0.5.1. patch.sh reads this (via the patch_urls output), loops.
+  patch_urls = {
+    "vuln-jdk21" = local.fixed_x64_url
+    "vuln-jdk17" = local.jdk17_fixed_x64_url
+    "vuln-jdk25" = local.jdk25_fixed_x64_url
+  }
 
   # Allow a self-hosted override for the (often-pulled) vulnerable x64 build.
   affected_x64_url = var.corretto_affected_url_override != "" ? var.corretto_affected_url_override : local.affected_x64_derived
@@ -102,6 +114,18 @@ locals {
       jdk_version = var.jdk17_version
       expected    = "EXPOSED"
       reason      = "vulnerable Java 17 on an AVX-512 VBMI CPU (a second affected train)"
+    }
+    # A THIRD affected train: vulnerable Java 25 (current LTS), EXPOSED by the
+    # 25 threshold (25.0.5.1). Three different trains, one detector.
+    "vuln-jdk25" = {
+      role        = "vuln-jdk25"
+      ami         = data.aws_ami.ubuntu_x86.id
+      instance    = var.x86_instance_type
+      subnet      = aws_subnet.private_a.id
+      jdk_url     = local.jdk25_x64_url
+      jdk_version = var.jdk25_version
+      expected    = "EXPOSED"
+      reason      = "vulnerable Java 25 on an AVX-512 VBMI CPU (a third affected train)"
     }
   }
 }

@@ -31,15 +31,17 @@ verification**.
 | **safe-arm** | `t4g.micro` (Graviton2) | Corretto **21.0.13** (same affected build) | ARM64 — no VBMI | **NOT EXPOSED** (CPU-immune) |
 | **safe-intel** | `t3.micro` (Skylake/Cascade Lake) | Corretto **21.0.13** (same affected build) | x86 but **no VBMI** | **NOT EXPOSED** (CPU-immune) |
 | **patched-x86** | `c7i.large` | Corretto **21.0.13.1** (fixed) | AVX-512 VBMI present | **NOT EXPOSED** (patched) |
-| **vuln-jdk17** | `c7i.large` | Corretto **17.0.13** (affected 17 train) | AVX-512 VBMI present | **EXPOSED** |
+| **vuln-jdk17** | `c7i.large` | Corretto **17.0.21** (affected 17 train) | AVX-512 VBMI present | **EXPOSED** |
+| **vuln-jdk25** | `c7i.large` | Corretto **25.0.5** (affected 25 train) | AVX-512 VBMI present | **EXPOSED** |
 
 Exposure requires **all three** of: a vulnerable JDK, an AVX-512 VBMI CPU, and
 an app that decodes attacker-controlled Base64. `safe-arm` and `safe-intel`
 both fail the **CPU** condition — one is ARM, the other is an older Intel chip
 without VBMI, which is the point: *not all x86 is affected, only the chips that
 carry the instruction*. `patched-x86` fails the **version** condition.
-`vuln-jdk21` (Java 21) and `vuln-jdk17` (Java 17) each meet all three — two
-different affected trains, proving the detector is not hardcoded to one.
+`vuln-jdk21`, `vuln-jdk17` and `vuln-jdk25` each meet all three across **three
+different affected trains** (21 / 17 / 25) — proving the detector is not
+hardcoded to one line, and `patch.sh` upgrades each to its own train's fix.
 
 ## Architecture
 

@@ -35,10 +35,17 @@ output "node_expected" {
   value       = { for role, node in local.nodes : role => node.expected }
 }
 
-# The FIXED Corretto URL — patch.sh hands this to vuln-jdk21 to upgrade in place.
+# The 21-train fixed URL (kept for reference / the single-node path).
 output "fixed_jdk_url" {
-  description = "Corretto URL of the patched JDK used by patch.sh"
+  description = "Corretto URL of the patched 21 JDK"
   value       = local.fixed_x64_url
+}
+
+# Per-node fix URLs — patch.sh upgrades each affected node to ITS OWN train's
+# fixed build (21.0.13.1.2 for vuln-jdk21, 17.0.21.1.2 for vuln-jdk17).
+output "patch_urls" {
+  description = "Map of affected node role -> the fixed Corretto URL patch.sh installs on it"
+  value       = local.patch_urls
 }
 
 # The affected JDK URL actually in effect — print it so you can confirm it
