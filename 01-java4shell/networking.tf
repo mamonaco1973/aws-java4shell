@@ -9,7 +9,7 @@
 # CIDR layout — 10.0.0.0/24 split into four /26 blocks (64 addresses each):
 #   10.0.0.0/26   — public  us-east-2a  (NAT gateway)
 #   10.0.0.64/26  — public  us-east-2b  (spare / AZ symmetry)
-#   10.0.0.128/26 — private us-east-2a  (vuln-x86, patched-x86)
+#   10.0.0.128/26 — private us-east-2a  (vuln-jdk21, patched-x86)
 #   10.0.0.192/26 — private us-east-2b  (safe-arm)
 # ================================================================================
 

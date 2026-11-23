@@ -99,7 +99,7 @@ NODES.update({
                 "AWS CLI, and your calif.io PoC"),
     "ssm":     (COL[1], ROW[1], "purple", "key", "AWS SSM",
                 "Session Manager / Run Command / Inventory"),
-    "vuln":    (COL[0], ROW[2], "danger", "cpu", "vuln-x86",
+    "vuln":    (COL[0], ROW[2], "danger", "cpu", "vuln-jdk21",
                 "c7i x86 / Corretto 21.0.13 / EXPOSED"),
     "arm":     (COL[1], ROW[2], "store", "shield", "safe-arm",
                 "t4g ARM64 / 21.0.13 / immune, no VBMI"),
@@ -133,7 +133,7 @@ EDGES = {
 ALT = ("The operator, running the AWS CLI and the public calif.io proof of "
        "concept, reaches the lab only through AWS SSM - Session Manager, Run "
        "Command and Inventory - because the nodes have no inbound network path. "
-       "SSM drives three nodes in private subnets: vuln-x86, a c7i x86 instance "
+       "SSM drives three nodes in private subnets: vuln-jdk21, a c7i x86 instance "
        "running the vulnerable Corretto 21.0.13 on an AVX-512 VBMI CPU, which is "
        "EXPOSED; safe-arm, a t4g Graviton ARM64 instance on the same vulnerable "
        "Java that is immune because ARM has no VBMI intrinsic; and patched-x86, "

@@ -35,7 +35,7 @@ provider "aws" {
 # ever hard-coded. The only difference is the architecture token in the name.
 # ================================================================================
 
-# x86-64 image for the c7i (Intel Sapphire Rapids) nodes — vuln-x86, patched-x86
+# x86-64 image for the c7i (Intel Sapphire Rapids) nodes — vuln-jdk21, patched-x86
 data "aws_ami" "ubuntu_x86" {
   most_recent = true
   owners      = ["099720109477"] # Canonical's official publisher account

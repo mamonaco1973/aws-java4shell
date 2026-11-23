@@ -16,7 +16,7 @@ output "region" {
   value       = var.region
 }
 
-# Map of role -> instance ID, e.g. {"vuln-x86" = "i-0abc...", ...}
+# Map of role -> instance ID, e.g. {"vuln-jdk21" = "i-0abc...", ...}
 output "node_ids" {
   description = "Instance ID for each lab node, keyed by role"
   value       = { for role, inst in aws_instance.node : role => inst.id }
@@ -35,16 +35,16 @@ output "node_expected" {
   value       = { for role, node in local.nodes : role => node.expected }
 }
 
-# The FIXED Corretto URL — patch.sh hands this to vuln-x86 to upgrade in place.
+# The FIXED Corretto URL — patch.sh hands this to vuln-jdk21 to upgrade in place.
 output "fixed_jdk_url" {
   description = "Corretto URL of the patched JDK used by patch.sh"
   value       = local.fixed_x64_url
 }
 
 # The affected JDK URL actually in effect — print it so you can confirm it
-# resolves (HTTP 200) before trusting the vuln-x86 verdict. See variables.tf.
+# resolves (HTTP 200) before trusting the vuln-jdk21 verdict. See variables.tf.
 output "affected_jdk_url" {
-  description = "Corretto URL the vuln-x86 / safe-arm nodes download — VERIFY this resolves"
+  description = "Corretto URL the vuln-jdk21 / safe-arm nodes download — VERIFY this resolves"
   value       = local.affected_x64_url
 }
 

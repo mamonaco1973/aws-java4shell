@@ -12,7 +12,7 @@ defensive side — **exposure detection, fleet discovery, mitigation, and patch
 verification**.
 
 > ### ⚠️ Intentionally vulnerable — do not deploy to production
-> `vuln-x86` runs a known-vulnerable JDK on purpose. Every node sits in a
+> `vuln-jdk21` runs a known-vulnerable JDK on purpose. Every node sits in a
 > private subnet with **no inbound path** and is reachable **only through SSM**.
 > Do not run this in a shared or production account, and do not expose it to
 > untrusted networks. Tear it down when you're done.
@@ -27,7 +27,7 @@ verification**.
 
 | Node | Instance | JDK | CPU feature | Verdict |
 |---|---|---|---|---|
-| **vuln-x86** | `c7i.large` (Intel Sapphire Rapids) | Corretto **21.0.13** (affected) | AVX-512 VBMI present | **EXPOSED** |
+| **vuln-jdk21** | `c7i.large` (Intel Sapphire Rapids) | Corretto **21.0.13** (affected) | AVX-512 VBMI present | **EXPOSED** |
 | **safe-arm** | `t4g.micro` (Graviton2) | Corretto **21.0.13** (same affected build) | ARM64 — no VBMI | **NOT EXPOSED** (CPU-immune) |
 | **safe-intel** | `t3.micro` (Skylake/Cascade Lake) | Corretto **21.0.13** (same affected build) | x86 but **no VBMI** | **NOT EXPOSED** (CPU-immune) |
 | **patched-x86** | `c7i.large` | Corretto **21.0.13.1** (fixed) | AVX-512 VBMI present | **NOT EXPOSED** (patched) |
@@ -38,14 +38,14 @@ an app that decodes attacker-controlled Base64. `safe-arm` and `safe-intel`
 both fail the **CPU** condition — one is ARM, the other is an older Intel chip
 without VBMI, which is the point: *not all x86 is affected, only the chips that
 carry the instruction*. `patched-x86` fails the **version** condition.
-`vuln-x86` (Java 21) and `vuln-jdk17` (Java 17) each meet all three — two
+`vuln-jdk21` (Java 21) and `vuln-jdk17` (Java 17) each meet all three — two
 different affected trains, proving the detector is not hardcoded to one.
 
 ## Architecture
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="architecture-dark.svg">
-  <img alt="The operator, running the AWS CLI and the public calif.io proof of concept, reaches the lab only through AWS SSM - Session Manager, Run Command and Inventory - because the nodes have no inbound network path. SSM drives three nodes in private subnets: vuln-x86, a c7i x86 instance running the vulnerable Corretto 21.0.13 on an AVX-512 VBMI CPU, which is EXPOSED; safe-arm, a t4g Graviton ARM64 instance on the same vulnerable Java that is immune because ARM has no VBMI intrinsic; and patched-x86, a c7i x86 instance on the fixed Corretto 21.0.13.1. The nodes reach out through a NAT gateway, egress only, to pull their pinned JDK tarballs from the Amazon Corretto archive. Each node publishes its verdict to SSM Inventory." src="architecture-light.svg">
+  <img alt="The operator, running the AWS CLI and the public calif.io proof of concept, reaches the lab only through AWS SSM - Session Manager, Run Command and Inventory - because the nodes have no inbound network path. SSM drives three nodes in private subnets: vuln-jdk21, a c7i x86 instance running the vulnerable Corretto 21.0.13 on an AVX-512 VBMI CPU, which is EXPOSED; safe-arm, a t4g Graviton ARM64 instance on the same vulnerable Java that is immune because ARM has no VBMI intrinsic; and patched-x86, a c7i x86 instance on the fixed Corretto 21.0.13.1. The nodes reach out through a NAT gateway, egress only, to pull their pinned JDK tarballs from the Amazon Corretto archive. Each node publishes its verdict to SSM Inventory." src="architecture-light.svg">
 </picture>
 
 Regenerate with `python3 make_diagram.py`.
@@ -91,7 +91,7 @@ which the stock package inventory never sees.
 | `./validate.sh` | wait for all nodes on SSM, assert each live verdict matches its intended one |
 | `./check-exposure.sh` | **the portable detector** — read-only, run it on any host (`--porcelain`, `--no-exec`); the same script the nodes run |
 | `./lab-verdicts.sh [node...]` | print the live verdict for one/all lab nodes over SSM (fan-out around the detector) |
-| `./patch.sh [node]` | upgrade `vuln-x86` in place to the fixed JDK, restart, re-check (EXPOSED → NOT_EXPOSED) |
+| `./patch.sh [node]` | upgrade `vuln-jdk21` in place to the fixed JDK, restart, re-check (EXPOSED → NOT_EXPOSED) |
 | `./fleet-query.sh` | SSM Inventory query of `Custom:Java4Shell`, account-wide for the region |
 | `./destroy.sh` | tear everything down |
 
@@ -136,7 +136,7 @@ cd aws-java4shell
 ```
 NODE           VERDICT      EXPECTED     JAVA       VBMI   RESULT
 ---------------------------------------------------------------------------------------
-vuln-x86       EXPOSED      EXPOSED      21.0.13    yes    PASS
+vuln-jdk21       EXPOSED      EXPOSED      21.0.13    yes    PASS
 safe-arm       NOT_EXPOSED  NOT_EXPOSED  21.0.13    no     PASS
 patched-x86    NOT_EXPOSED  NOT_EXPOSED  21.0.13.1  yes    PASS
 
@@ -151,7 +151,7 @@ patched-x86    NOT_EXPOSED  NOT_EXPOSED  21.0.13.1  yes    PASS
 
 1. **See a verdict page.** Open an SSM tunnel to a node's web server and browse it:
    ```bash
-   ID=$(terraform -chdir=01-java4shell output -json node_ids | jq -r '."vuln-x86"')
+   ID=$(terraform -chdir=01-java4shell output -json node_ids | jq -r '."vuln-jdk21"')
    aws ssm start-session --target "$ID" \
      --document-name AWS-StartPortForwardingSession \
      --parameters '{"portNumber":["80"],"localPortNumber":["8088"]}'
@@ -160,7 +160,7 @@ patched-x86    NOT_EXPOSED  NOT_EXPOSED  21.0.13.1  yes    PASS
 2. **Triage the fleet:** `./fleet-query.sh` — one line per node, EXPOSED first.
 3. **Reach the decoder** (the exposure surface) the same way, forwarding
    `8080`, and point your `calif.io/java4shell` PoC at `localhost`.
-4. **Remediate:** `./patch.sh`, then `./lab-verdicts.sh vuln-x86` — the
+4. **Remediate:** `./patch.sh`, then `./lab-verdicts.sh vuln-jdk21` — the
    verdict flips to `NOT_EXPOSED`.
 
 ## Teardown

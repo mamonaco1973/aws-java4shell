@@ -19,7 +19,7 @@ and the (benign) exposure surface; the user runs the researchers' external PoC
 ./apply.sh                      # check env, terraform init + apply, then validate
 ./validate.sh                   # assert each node's live verdict == intended verdict
 ./check-exposure.sh [node...]   # print live verdict(s) over SSM
-./patch.sh [node]               # upgrade vuln-x86 in place to the fixed JDK, re-check
+./patch.sh [node]               # upgrade vuln-jdk21 in place to the fixed JDK, re-check
 ./fleet-query.sh                # SSM Inventory query of Custom:Java4Shell, account-wide
 ./destroy.sh                    # teardown
 ```
@@ -30,7 +30,7 @@ Single Terraform phase in `01-java4shell/`. No modules, no workspaces, no ALB,
 no ASG, no CloudWatch (dropped from the aws-autoscaling seed).
 
 - **Region:** us-east-2 (var.region)
-- **Nodes:** `vuln-x86` (c7i.large, Corretto 21.0.13, EXPOSED), `safe-arm`
+- **Nodes:** `vuln-jdk21` (c7i.large, Corretto 21.0.13, EXPOSED), `safe-arm`
   (t4g.micro, Corretto 21.0.13, immune — no VBMI), `patched-x86` (c7i.large,
   Corretto 21.0.13.1, patched). Defined once in `locals.tf` → `local.nodes`.
 - **OS:** Ubuntu 24.04 LTS — amd64 for the c7i nodes, arm64 for the t4g node

@@ -3,7 +3,7 @@ set -uo pipefail
 
 # ================================================================================
 # patch.sh — remediate the vulnerable node in place
-# Upgrades vuln-x86 from the affected JDK (21.0.13) to the fixed build
+# Upgrades vuln-jdk21 from the affected JDK (21.0.13) to the fixed build
 # (21.0.13.1) over SSM, restarts the decoder on the new runtime, and re-runs the
 # on-box exposure check to confirm the verdict flips EXPOSED -> NOT_EXPOSED.
 #
@@ -17,12 +17,12 @@ set -uo pipefail
 #   systemd unit if you want to demo the MITIGATED state before patching.)
 #
 # Usage:
-#   ./patch.sh                 # patches vuln-x86
+#   ./patch.sh                 # patches vuln-jdk21
 #   ./patch.sh <role>          # patches a named node
 # ================================================================================
 
 CHDIR="01-java4shell"
-ROLE="${1:-vuln-x86}"
+ROLE="${1:-vuln-jdk21}"
 POLL=10
 TIMEOUT=300
 

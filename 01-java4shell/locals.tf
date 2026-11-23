@@ -47,8 +47,8 @@ locals {
   #   reason       why, in one phrase, for the page and validation output
   # ------------------------------------------------------------------------------
   nodes = {
-    "vuln-x86" = {
-      role        = "vuln-x86"
+    "vuln-jdk21" = {
+      role        = "vuln-jdk21"
       ami         = data.aws_ami.ubuntu_x86.id
       instance    = var.x86_instance_type
       subnet      = aws_subnet.private_a.id
@@ -77,7 +77,7 @@ locals {
       expected    = "NOT_EXPOSED"
       reason      = "AVX-512 VBMI CPU, but the JDK carries the 21.0.13.1 fix"
     }
-    # x86, same vulnerable Java as vuln-x86 — but an OLDER Intel chip with no
+    # x86, same vulnerable Java as vuln-jdk21 — but an OLDER Intel chip with no
     # AVX-512 VBMI, so it is immune by hardware. Proves "not all x86", only the
     # chips that carry the instruction.
     "safe-intel" = {

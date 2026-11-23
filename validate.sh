@@ -3,7 +3,7 @@
 # File: validate.sh
 # Confirms the lab deployed as intended: each node's LIVE exposure verdict must
 # match the verdict it was designed to produce (locals.tf -> node_expected).
-#   vuln-x86     EXPOSED       (vulnerable JDK + AVX-512 VBMI CPU)
+#   vuln-jdk21     EXPOSED       (vulnerable JDK + AVX-512 VBMI CPU)
 #   safe-arm     NOT_EXPOSED   (same JDK, but ARM64 has no VBMI intrinsic)
 #   patched-x86  NOT_EXPOSED   (VBMI CPU, but JDK carries the 21.0.13.1 fix)
 # ===============================================================================

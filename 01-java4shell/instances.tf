@@ -3,7 +3,7 @@
 # Three standalone instances — no Auto Scaling group, because this lab is about
 # comparing three fixed, individually-identifiable machines, not elasticity:
 #
-#   vuln-x86     c7i.large   x86-64  Corretto 21.0.13   (affected)  -> EXPOSED
+#   vuln-jdk21     c7i.large   x86-64  Corretto 21.0.13   (affected)  -> EXPOSED
 #   safe-arm     t4g.micro   ARM64   Corretto 21.0.13   (CPU-immune)-> NOT EXPOSED
 #   patched-x86  c7i.large   x86-64  Corretto 21.0.13.1 (fixed)     -> NOT EXPOSED
 #
