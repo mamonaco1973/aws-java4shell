@@ -207,24 +207,56 @@ scan_running() {
   done
 }
 
-# Installed JDKs (may be idle): dedupe real paths of every java binary under
-# PATH and the usual install roots. Idle JDKs cannot carry a runtime flag, so
-# their verdict assumes the intrinsic is enabled — the safe default.
+# Every java/javac binary we can discover, from many sources — PATH, JAVA_HOME,
+# the alternatives system, the standard cross-distro install roots (including
+# RHEL's lib64 and snap), and per-user SDKMAN trees. Overlap between sources is
+# fine: scan_installed de-dupes by JDK home. Each producer is guarded so a miss
+# (no javac, no alternatives, an unset JAVA_HOME, an absent root) cannot trip the
+# script's `set -e` — notably `command -v java` exits non-zero when java is not
+# on PATH, which is the normal case for a JDK that lives only under /opt.
+jdk_candidates() {
+  command -v java  2>/dev/null || true
+  command -v javac 2>/dev/null || true
+  if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+    printf '%s\n' "$JAVA_HOME/bin/java"
+  fi
+  if command -v update-alternatives >/dev/null 2>&1; then
+    update-alternatives --list java  2>/dev/null || true
+    update-alternatives --list javac 2>/dev/null || true
+  fi
+  # -maxdepth 8: vendors nest a JDK several levels deep (…/suite/runtime/jdk).
+  find /usr/lib/jvm /usr/lib64/jvm /usr/java /opt /snap /usr/local/lib/jvm \
+    -maxdepth 8 -name java -type f 2>/dev/null || true
+  # SDKMAN installs under each home get their own, shallower root.
+  find /root/.sdkman /home/*/.sdkman -maxdepth 6 -name java -type f 2>/dev/null || true
+}
+
+# Installed JDKs (may be idle): judge every one jdk_candidates found, de-duped by
+# JDK home so a JDK's java and javac — and any PATH/alternatives symlink into it —
+# collapse to a single entry. Idle JDKs cannot carry a runtime flag, so their
+# verdict assumes the intrinsic is enabled (the safe default). A JDK whose version
+# cannot be read (no release file, and --no-exec forbids launching it) is reported
+# REVIEW, never dropped: silently skipping it could hide a vulnerable runtime
+# behind a passing NOT_EXPOSED.
 scan_installed() {
-  local seen=" " bin real raw v r rsn
+  local seen=" " bin real home raw v r rsn
   while IFS= read -r bin; do
     [ -x "$bin" ] || continue
     real="$(readlink -f "$bin" 2>/dev/null || true)"
-    [ -n "$real" ] && [[ "$seen" != *" $real "* ]] || continue
-    seen+="$real "
-    raw="$(jvm_version "$real")"; [ -n "$raw" ] || continue
+    [ -n "$real" ] || continue
+    home="$(dirname "$(dirname "$real")")"
+    [[ "$seen" != *" $home "* ]] || continue
+    seen+="$home "
+    raw="$(jvm_version "$real")"
+    if [ -z "$raw" ]; then
+      add_row installed "$home" "unknown" REVIEW \
+        "installed JDK, version undetermined (no release file; re-run without --no-exec)"
+      continue
+    fi
     v="$(normalize "$raw")"
     IFS='|' read -r r rsn <<<"$(verdict "$v" "")"
-    add_row installed "$real" "$v" "$r" "$rsn"
-  done < <(
-    { command -v java 2>/dev/null
-      find /usr/lib/jvm /usr/java /opt /usr/local/lib/jvm -maxdepth 4 \
-        -name java -type f 2>/dev/null; } | sort -u)
+    add_row installed "$home" "$v" "$r" "$rsn"
+  done < <(jdk_candidates | sort -u)
 }
 
 scan_running
@@ -235,14 +267,26 @@ scan_installed
 # ==============================================================================
 RANK() { case "$1" in EXPOSED) echo 3;; REVIEW) echo 2;; MITIGATED) echo 1;;
   *) echo 0;; esac; }
-HOST_VERDICT="NOT_EXPOSED"; HOST_VER="none"; HOST_REASON="no JVM found"
+# Tie-break within the top verdict: prefer the most security-relevant reason, so
+# "vulnerable build, but this CPU can't run the intrinsic" (or a mitigating flag)
+# is not hidden behind a plain "patched" line from another JDK on the same host.
+REASON_RANK() { case "$1" in
+  *"no AVX-512 VBMI path"*|*"intrinsic disabled by flag"*) echo 2;; *) echo 1;;
+esac; }
+HOST_VERDICT=""; HOST_VER="none"; HOST_REASON="no JVM found"
 for row in "${ROWS[@]:-}"; do
   [ -n "$row" ] || continue
   IFS='|' read -r _ _ v r rsn <<<"$row"
-  if [ "$(RANK "$r")" -ge "$(RANK "$HOST_VERDICT")" ]; then
+  if [ -z "$HOST_VERDICT" ]; then
+    HOST_VERDICT="$r"; HOST_VER="$v"; HOST_REASON="$rsn"; continue
+  fi
+  rr="$(RANK "$r")"; cur="$(RANK "$HOST_VERDICT")"
+  if [ "$rr" -gt "$cur" ] || { [ "$rr" -eq "$cur" ] && \
+     [ "$(REASON_RANK "$rsn")" -gt "$(REASON_RANK "$HOST_REASON")" ]; }; then
     HOST_VERDICT="$r"; HOST_VER="$v"; HOST_REASON="$rsn"
   fi
 done
+[ -n "$HOST_VERDICT" ] || HOST_VERDICT="NOT_EXPOSED"
 
 if [ "$PORCELAIN" = true ]; then
   # Keys consumed by the lab's validate.sh / patch.sh over SSM.

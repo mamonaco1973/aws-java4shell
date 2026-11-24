@@ -17,9 +17,10 @@ and the (benign) exposure surface; the user runs the researchers' external PoC
 
 ```bash
 ./apply.sh                      # check env, terraform init + apply, then validate
-./validate.sh                   # assert each node's live verdict == intended verdict
-./check-exposure.sh [node...]   # print live verdict(s) over SSM
-./patch.sh [node]               # upgrade vuln-jdk21 in place to the fixed JDK, re-check
+./validate.sh                   # assert each node's live verdict == intended, with per-JDK rows
+./lab-verdicts.sh [node...]     # print live verdict(s) + per-JDK breakdown over SSM
+./patch.sh [node] [train...]    # upgrade a node's JDKs in place to the fixed builds, re-check
+                                #   (all 3 trains by default; name trains for a partial/mixed patch)
 ./fleet-query.sh                # SSM Inventory query of Custom:Java4Shell, account-wide
 ./destroy.sh                    # teardown
 ```
@@ -30,17 +31,22 @@ Single Terraform phase in `01-java4shell/`. No modules, no workspaces, no ALB,
 no ASG, no CloudWatch (dropped from the aws-autoscaling seed).
 
 - **Region:** us-east-2 (var.region)
-- **Nodes:** `vuln-jdk21` / `vuln-jdk17` / `vuln-jdk25` (c7i.large, EXPOSED
-  across three affected trains), `safe-arm` (t4g.micro, immune — ARM),
-  `safe-intel` (t3.micro, immune — x86 without VBMI). No pre-patched node;
-  `patch.sh` flips a vuln node live. Defined once in `locals.tf` →
-  `local.nodes`.
+- **Nodes:** three, one per CPU class, and **every node installs all three
+  affected trains (17.0.13 + 21.0.13 + 25.0.5)** arch-matched:
+  `vuln-x86` (c7i.large, AVX-512 VBMI → EXPOSED, all three JDKs exposed),
+  `safe-arm` (t4g.micro, ARM → immune), `safe-intel` (t3.micro, x86 without
+  VBMI → immune). The detector judges every installed JDK (worst-wins), so a
+  node's verdict rolls up its per-train verdicts. No pre-patched node;
+  `patch.sh` upgrades all three trains on a node live (or a named subset, which
+  leaves a mixed EXPOSED host). Defined once in `locals.tf` → `local.trains`
+  (the 3 trains) and `local.nodes` (the 3 machines); `var.decoder_train` picks
+  which train the decoder runs on (default 21).
 - **OS:** Ubuntu 24.04 LTS — amd64 for the c7i/t3 nodes, arm64 for the t4g node
   (two AMI data sources in `main.tf`).
 - **Access:** SSM only — private subnets, no public IP, no SSH, egress-only SG.
 - **Exposure surface:** a minimal Java Base64-decode HTTP service
   (`scripts/userdata.sh.tftpl` writes `Decoder.java`), run as
-  `java4shell-decoder.service`.
+  `java4shell-decoder.service` on the decoder train's JDK.
 - **Verdict:** `/opt/java4shell/exposure-check.sh` (written by user data) is the
   single source of truth; it writes the verdict page + `verdict.json` and
   publishes a `Custom:Java4Shell` SSM Inventory entry.

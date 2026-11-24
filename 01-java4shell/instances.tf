@@ -1,18 +1,21 @@
 # ================================================================================
 # Lab Nodes
 # Three standalone instances — no Auto Scaling group, because this lab is about
-# comparing three fixed, individually-identifiable machines, not elasticity:
+# comparing three fixed, individually-identifiable machines, not elasticity.
+# Every node installs ALL THREE affected trains (17 / 21 / 25); only the CPU
+# differs, which is the whole lesson:
 #
-#   vuln-jdk21     c7i.large   x86-64  Corretto 21.0.13   (affected)  -> EXPOSED
-#   safe-arm     t4g.micro   ARM64   Corretto 21.0.13   (CPU-immune)-> NOT EXPOSED
+#   vuln-x86     c7i.large   x86-64 AVX-512 VBMI      -> EXPOSED
+#   safe-arm     t4g.micro   ARM64 (no VBMI)          -> NOT EXPOSED (CPU-immune)
+#   safe-intel   t3.micro    x86-64 without VBMI      -> NOT EXPOSED (CPU-immune)
 #
 # All three are described once in local.nodes (locals.tf); this file just
 # iterates that map so adding or retyping a node is a one-line change there.
 #
 # Each node's userdata is the shared template rendered with that node's values.
 # "One userdata per node" is achieved through templatefile() rather than three
-# near-identical copies — the nodes differ only in JDK URL, version, and the
-# expected verdict, so a single reviewed template avoids drift between them.
+# near-identical copies — the nodes differ only in architecture, their JDK list,
+# and the expected verdict, so a single reviewed template avoids drift.
 # ================================================================================
 
 resource "aws_instance" "node" {
@@ -57,15 +60,16 @@ resource "aws_instance" "node" {
   user_data_base64 = base64gzip(templatefile(
     "${path.module}/scripts/userdata.sh.tftpl", {
       node_role        = each.value.role
-      jdk_url          = each.value.jdk_url
-      jdk_version      = each.value.jdk_version
       expected_verdict = each.value.expected
       expected_reason  = each.value.reason
-      affected_version = var.affected_version
-      fixed_version    = var.fixed_version
+      arch             = each.value.arch
+      decoder_major    = local.decoder_major
       decoder_port     = var.decoder_port
       region           = var.region
       deployment_name  = local.name
+      # All three affected trains this node installs, one per line as
+      # "major|version|url"; userdata loops over it and installs each.
+      jdks = join("\n", [for j in each.value.jdks : "${j.major}|${j.version}|${j.url}"])
       # The portable detector, injected verbatim so the node runs the exact
       # same script we ship in the repo and viewers run on their own hosts.
       detector = file("${path.module}/../check-exposure.sh")

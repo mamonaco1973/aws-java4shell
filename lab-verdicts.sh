@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # Usage:
 #   ./lab-verdicts.sh                 # all three nodes
-#   ./lab-verdicts.sh vuln-jdk21        # one (or several) named nodes
+#   ./lab-verdicts.sh vuln-x86          # one (or several) named nodes
 #
 # For each node it runs the on-box /opt/java4shell/exposure-check.sh over SSM
 # Run Command and prints the result. This is only the operator fan-out: the
@@ -89,6 +89,9 @@ for role in "${ROLES[@]}"; do
 
   printf '%-14s %-12s %-10s %-6s %-6s %s\n' \
     "${role}" "${verdict:-?}" "${java:-?}" "${arch:-?}" "${vbmi:-?}" "${reason:-?}"
+
+  # Per-JDK breakdown: JVM|installed|<home>|<version>|<verdict>|<reason>
+  echo "${out}" | sed -n 's/^JVM|installed|[^|]*|\([^|]*\)|\([^|]*\)|.*/                 \1  ->  \2/p'
 done
 
 echo ""

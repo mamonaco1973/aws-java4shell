@@ -163,3 +163,12 @@ variable "decoder_port" {
   type        = number
   default     = 8080
 }
+
+# Which train the exposure-surface decoder service runs on. All three trains are
+# installed on every node and all three are judged by the detector; this only
+# picks which JDK the (single) sample service executes under.
+variable "decoder_train" {
+  description = "Major version whose JDK the decoder service runs on (17, 21, or 25)"
+  type        = string
+  default     = "21"
+}

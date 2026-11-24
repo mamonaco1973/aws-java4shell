@@ -7,12 +7,14 @@ Base64` decode intrinsic that Oracle/OpenJDK patched out-of-cycle on
 
 The lab's point is **cloud-specific**: exploitability needs an x86-64 CPU with
 **AVX-512 VBMI**, so the *same* vulnerable Java is harmless on **Graviton
-(ARM64)**. Three nodes make that concrete, and the tooling here handles the
+(ARM64)**. Three nodes — one per CPU class — make that concrete, and **each
+carries all three affected JDK trains (17 / 21 / 25) at once**, so the detector
+has to judge every installed JDK, not just one. The tooling here handles the
 defensive side — **exposure detection, fleet discovery, mitigation, and patch
 verification**.
 
 > ### ⚠️ Intentionally vulnerable — do not deploy to production
-> `vuln-jdk21` runs a known-vulnerable JDK on purpose. Every node sits in a
+> `vuln-x86` runs known-vulnerable JDKs on purpose. Every node sits in a
 > private subnet with **no inbound path** and is reachable **only through SSM**.
 > Do not run this in a shared or production account, and do not expose it to
 > untrusted networks. Tear it down when you're done.
@@ -25,29 +27,33 @@ verification**.
 
 ## The three nodes
 
-| Node | Instance | JDK | CPU feature | Verdict |
+Every node installs **all three affected trains** — Corretto **17.0.13 +
+21.0.13 + 25.0.5** (arch-matched) — so only the CPU differs between them:
+
+| Node | Instance | CPU feature | JDKs installed | Verdict |
 |---|---|---|---|---|
-| **vuln-jdk21** | `c7i.large` (Intel Sapphire Rapids) | Corretto **21.0.13** (affected) | AVX-512 VBMI present | **EXPOSED** |
-| **safe-arm** | `t4g.micro` (Graviton2) | Corretto **21.0.13** (same affected build) | ARM64 — no VBMI | **NOT EXPOSED** (CPU-immune) |
-| **safe-intel** | `t3.micro` (Skylake/Cascade Lake) | Corretto **21.0.13** (same affected build) | x86 but **no VBMI** | **NOT EXPOSED** (CPU-immune) |
-| **vuln-jdk17** | `c7i.large` | Corretto **17.0.13** (affected 17 train) | AVX-512 VBMI present | **EXPOSED** |
-| **vuln-jdk25** | `c7i.large` | Corretto **25.0.5** (affected 25 train) | AVX-512 VBMI present | **EXPOSED** |
+| **vuln-x86** | `c7i.large` (Intel Sapphire Rapids) | AVX-512 VBMI present | 17.0.13 + 21.0.13 + 25.0.5 (all affected) | **EXPOSED** |
+| **safe-arm** | `t4g.micro` (Graviton2) | ARM64 — no VBMI | same three affected builds (aarch64) | **NOT EXPOSED** (CPU-immune) |
+| **safe-intel** | `t3.micro` (Skylake/Cascade Lake) | x86 but **no VBMI** | same three affected builds | **NOT EXPOSED** (CPU-immune) |
 
 Exposure requires **all three** of: a vulnerable JDK, an AVX-512 VBMI CPU, and
-an app that decodes attacker-controlled Base64. `safe-arm` and `safe-intel`
-both fail the **CPU** condition — one is ARM, the other is an older Intel chip
-without VBMI, which is the point: *not all x86 is affected, only the chips that
-carry the instruction*. `vuln-jdk21`, `vuln-jdk17` and `vuln-jdk25` each meet
-all three across **three affected trains** (21 / 17 / 25) — proving the detector
-is not hardcoded to one line. There is **no pre-patched node**: the version fix
-is shown live by `./patch.sh`, which upgrades each train to its own build and
-flips it EXPOSED → NOT_EXPOSED on re-check.
+an app that decodes attacker-controlled Base64. All three nodes carry the same
+three vulnerable JDKs; `safe-arm` and `safe-intel` fail only the **CPU**
+condition — one is ARM, the other an older Intel chip without VBMI — which is
+the point: *not all x86 is affected, only the chips that carry the instruction*.
+On `vuln-x86` every train meets all three conditions, so the detector reports
+**three EXPOSED JDKs** and the host verdict is EXPOSED; the detector lists each
+train's own verdict, so a host with a mix of fine and vulnerable JDKs reads
+correctly (worst-wins). There is **no pre-patched node**: the version fix is
+shown live by `./patch.sh`, which upgrades **all three trains in place**
+(`./patch.sh vuln-x86`) and flips the node EXPOSED → NOT_EXPOSED — or just one
+train (`./patch.sh vuln-x86 17`) to demonstrate a still-exposed mixed host.
 
 ## Architecture
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="architecture-dark.svg">
-  <img alt="The operator, running the AWS CLI and the public calif.io proof of concept, reaches the lab only through AWS SSM - Session Manager, Run Command and Inventory - because the nodes have no inbound network path. SSM drives five nodes in private subnets. Three are EXPOSED: vuln-jdk21, vuln-jdk17 and vuln-jdk25, all c7i x86 instances running the same vulnerable AVX-512 VBMI intrinsic on three different affected Java trains (Corretto 21.0.13, 17.0.13 and 25.0.5). Two are immune even though they run the same vulnerable Java: safe-arm, a t4g Graviton ARM64 instance, and safe-intel, a t3 x86 instance - neither has AVX-512 VBMI, so the bug cannot fire. There is no pre-patched node; patch.sh flips a vulnerable node live. The nodes egress through a NAT gateway to pull pinned JDK tarballs from the Amazon Corretto archive, and each publishes its verdict to SSM Inventory." src="architecture-light.svg">
+  <img alt="The operator, running the AWS CLI and the public calif.io proof of concept, reaches the lab only through AWS SSM - Session Manager, Run Command and Inventory - because the nodes have no inbound network path. SSM drives three nodes in private subnets, and every node installs all three affected Java trains at once (Corretto 17.0.13, 21.0.13 and 25.0.5), so the detector must judge every installed JDK. One node is EXPOSED: vuln-x86, a c7i x86 instance with the AVX-512 VBMI instruction the vulnerable intrinsic needs, so all three of its JDKs are exposed. The other two run the same three vulnerable JDKs but are immune because neither has AVX-512 VBMI: safe-arm, a t4g Graviton ARM64 instance, and safe-intel, a t3 x86 instance. There is no pre-patched node; patch.sh upgrades all three trains on a node live to flip it from EXPOSED to not exposed. The nodes egress through a NAT gateway to pull pinned JDK tarballs from the Amazon Corretto archive, and each publishes its verdict to SSM Inventory." src="architecture-light.svg">
 </picture>
 
 Regenerate with `python3 make_diagram.py`.
@@ -92,8 +98,8 @@ which the stock package inventory never sees.
 | `./apply.sh` | check env, `terraform init && apply`, then `validate.sh` |
 | `./validate.sh` | wait for all nodes on SSM, assert each live verdict matches its intended one |
 | `./check-exposure.sh` | **the portable detector** — read-only, run it on any host (`--porcelain`, `--no-exec`); the same script the nodes run |
-| `./lab-verdicts.sh [node...]` | print the live verdict for one/all lab nodes over SSM (fan-out around the detector) |
-| `./patch.sh [node]` | upgrade `vuln-jdk21` in place to the fixed JDK, restart, re-check (EXPOSED → NOT_EXPOSED) |
+| `./lab-verdicts.sh [node...]` | print the live verdict + per-JDK breakdown for one/all lab nodes over SSM |
+| `./patch.sh [node] [train...]` | upgrade a node's JDKs in place to the fixed builds, restart, re-check (EXPOSED → NOT_EXPOSED); all three trains by default, or only the named ones |
 | `./fleet-query.sh` | SSM Inventory query of `Custom:Java4Shell`, account-wide for the region |
 | `./destroy.sh` | tear everything down |
 
@@ -108,22 +114,23 @@ No SSH client is needed — access is entirely through SSM Session Manager.
 
 ## ⚠️ Verify the vulnerable build before you deploy
 
-The default **vulnerable** build is Corretto `21.0.13.0.11` — the last pre-patch
-21 tag before the fix `21.0.13.1.2` — and both its tarballs currently download
-fine. But Amazon may pull vulnerable builds from the public archive at any time,
-so confirm it still resolves and matches what your PoC targets. Before (or right
-after) `apply.sh`:
+Each node downloads the affected build of all three trains. The default
+vulnerable 21 build is Corretto `21.0.13.0.11` — the last pre-patch 21 tag
+before the fix `21.0.13.1.2`. But Amazon may pull vulnerable builds from the
+public archive at any time, so confirm they still resolve and match what your
+PoC targets. `check_env.sh` (run by `apply.sh`) HEAD-checks every affected and
+fixed build before apply; you can also print the URLs in effect:
 
 ```bash
-terraform -chdir=01-java4shell output affected_jdk_url   # print the URL in effect
-curl -IfsS "$(terraform -chdir=01-java4shell output -raw affected_jdk_url)" | head -1
+./check_env.sh                                                        # preflight all builds
+terraform -chdir=01-java4shell output -json affected_jdks | jq -r '.["vuln-x86"][].url'
 ```
 
-If it doesn't return `200`, set `corretto_affected_build` to the exact build
-your PoC targets, or stage the artifact yourself and point
-`corretto_affected_url_override` at it (see `variables.tf`). If the download
-fails at boot, the node still comes up and reads **JDK INSTALL FAILED** — never
-a misleading "not exposed".
+If any doesn't return `200`, set the matching build string in `variables.tf` to
+the exact build your PoC targets, or stage the artifact yourself and point
+`corretto_affected_url_override` at the 21 x64 build (see `variables.tf`). If a
+download fails at boot, the node still comes up and reads **UNKNOWN** — never a
+misleading "not exposed".
 
 ## Deploy
 
@@ -133,16 +140,25 @@ cd aws-java4shell
 ./apply.sh
 ```
 
-`validate.sh` then prints each node's live verdict against its intended one:
+`validate.sh` then prints each node's live verdict against its intended one,
+with the per-JDK breakdown underneath so you can see the detector judged all
+three trains:
 
 ```
-NODE           VERDICT      EXPECTED     JAVA       VBMI   RESULT
+NODE         VERDICT      EXPECTED     VBMI   JDKS  RESULT
 ---------------------------------------------------------------------------------------
-vuln-jdk21     EXPOSED      EXPOSED      21.0.13    yes    PASS
-vuln-jdk17     EXPOSED      EXPOSED      17.0.13    yes    PASS
-vuln-jdk25     EXPOSED      EXPOSED      25.0.5     yes    PASS
-safe-arm       NOT_EXPOSED  NOT_EXPOSED  21.0.13    no     PASS
-safe-intel     NOT_EXPOSED  NOT_EXPOSED  21.0.13    no     PASS
+safe-arm     NOT_EXPOSED  NOT_EXPOSED  no     3     PASS
+                 17.0.13  ->  NOT_EXPOSED
+                 21.0.13  ->  NOT_EXPOSED
+                 25.0.5  ->  NOT_EXPOSED
+safe-intel   NOT_EXPOSED  NOT_EXPOSED  no     3     PASS
+                 17.0.13  ->  NOT_EXPOSED
+                 21.0.13  ->  NOT_EXPOSED
+                 25.0.5  ->  NOT_EXPOSED
+vuln-x86     EXPOSED      EXPOSED      yes    3     PASS
+                 17.0.13  ->  EXPOSED
+                 21.0.13  ->  EXPOSED
+                 25.0.5  ->  EXPOSED
 
 =================================================================================
   Java4Shell (CVE-2026-114938) — lab validation
@@ -153,9 +169,10 @@ safe-intel     NOT_EXPOSED  NOT_EXPOSED  21.0.13    no     PASS
 
 ## Try it
 
-1. **See a verdict page.** Open an SSM tunnel to a node's web server and browse it:
+1. **See a verdict page.** Open an SSM tunnel to a node's web server and browse it
+   (the page lists every installed JDK and its verdict):
    ```bash
-   ID=$(terraform -chdir=01-java4shell output -json node_ids | jq -r '."vuln-jdk21"')
+   ID=$(terraform -chdir=01-java4shell output -json node_ids | jq -r '."vuln-x86"')
    aws ssm start-session --target "$ID" \
      --document-name AWS-StartPortForwardingSession \
      --parameters '{"portNumber":["80"],"localPortNumber":["8088"]}'
@@ -164,8 +181,10 @@ safe-intel     NOT_EXPOSED  NOT_EXPOSED  21.0.13    no     PASS
 2. **Triage the fleet:** `./fleet-query.sh` — one line per node, EXPOSED first.
 3. **Reach the decoder** (the exposure surface) the same way, forwarding
    `8080`, and point your `calif.io/java4shell` PoC at `localhost`.
-4. **Remediate:** `./patch.sh`, then `./lab-verdicts.sh vuln-jdk21` — the
-   verdict flips to `NOT_EXPOSED`.
+4. **Remediate one train** to see a mixed host: `./patch.sh vuln-x86 17` leaves
+   21 and 25 vulnerable, so the node stays `EXPOSED` with 17 now clean.
+5. **Remediate fully:** `./patch.sh vuln-x86`, then `./lab-verdicts.sh vuln-x86`
+   — all three trains upgrade and the verdict flips to `NOT_EXPOSED`.
 
 ## Teardown
 

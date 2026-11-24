@@ -1,10 +1,11 @@
 #!/bin/bash
 # ================================================================================
 # userdata.sh (rendered per node from userdata.sh.tftpl)
-# Runs once on first boot via cloud-init. Installs a pinned Amazon Corretto JDK,
-# stands up a minimal Base64-decode service (the realistic exposure surface for
-# CVE-2026-114938), computes this node's exposure verdict, serves it as a page,
-# and publishes it to SSM Inventory.
+# Runs once on first boot via cloud-init. Installs the pinned Amazon Corretto
+# builds for ALL THREE affected trains (17 / 21 / 25), stands up a minimal
+# Base64-decode service (the realistic exposure surface for CVE-2026-114938) on
+# the decoder train, computes this node's exposure verdict across every installed
+# JDK, serves it as a page, and publishes it to SSM Inventory.
 #
 # Terraform substitutes the dollar-brace template values below at render time;
 # anything a shell variable needs is written doubled ($$) so it survives to the
@@ -23,15 +24,15 @@ export DEBIAN_FRONTEND=noninteractive
 # Baked-in node identity (from Terraform)
 # ------------------------------------------------------------------------------
 NODE_ROLE="${node_role}"
-JDK_URL="${jdk_url}"
-JDK_LABEL="${jdk_version}"
 EXPECTED="${expected_verdict}"
 EXPECTED_REASON="${expected_reason}"
-AFFECTED_VERSION="${affected_version}"
-FIXED_VERSION="${fixed_version}"
+ARCH="${arch}"
+DECODER_MAJOR="${decoder_major}"
 DECODER_PORT="${decoder_port}"
 REGION="${region}"
 DEPLOYMENT="${deployment_name}"
+# One "major|version|url" line per affected train this node installs.
+JDKS="${jdks}"
 
 APPDIR=/opt/java4shell
 mkdir -p "$${APPDIR}"
@@ -54,30 +55,45 @@ TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
   -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
 IID=$(curl -s -H "X-aws-ec2-metadata-token: $${TOKEN}" \
   http://169.254.169.254/latest/meta-data/instance-id)
-ITYPE=$(curl -s -H "X-aws-ec2-metadata-token: $${TOKEN}" \
-  http://169.254.169.254/latest/meta-data/instance-type)
-AZ=$(curl -s -H "X-aws-ec2-metadata-token: $${TOKEN}" \
-  http://169.254.169.254/latest/meta-data/placement/availability-zone)
 
 # ------------------------------------------------------------------------------
-# Install the pinned Corretto JDK
-# The vulnerable build may have been pulled from the public archive — if the
-# download fails, we DO NOT abort. The node stays up and reachable over SSM and
-# its verdict reads "JDK INSTALL FAILED", never a misleading "not exposed".
+# Install every affected JDK train for this node's architecture.
+# A host carrying several JDKs is the realistic case the detector is built for:
+# check-exposure.sh judges EVERY installed JDK and the node's verdict is the
+# worst across them. A failed download never aborts the node — it stays
+# reachable over SSM and the detector simply reports on whatever installed.
 # ------------------------------------------------------------------------------
-echo "NOTE: downloading Corretto from $${JDK_URL}"
-JDK_OK=true
-if curl -fL --retry 20 --retry-delay 8 --retry-all-errors --retry-connrefused --connect-timeout 10 -o /tmp/corretto.tar.gz "$${JDK_URL}"; then
-  JDK_TOPDIR=$(tar tzf /tmp/corretto.tar.gz | head -1 | cut -d/ -f1)
-  tar xzf /tmp/corretto.tar.gz -C /opt
-  ln -sfn "/opt/$${JDK_TOPDIR}" "$${APPDIR}/jdk"
-  echo "NOTE: installed $${JDK_TOPDIR}"
+INSTALLED=0
+mapfile -t JDK_LINES <<< "$${JDKS}"
+for line in "$${JDK_LINES[@]}"; do
+  [ -n "$${line}" ] || continue
+  MAJOR="$${line%%|*}"
+  rest="$${line#*|}"
+  VER="$${rest%%|*}"
+  URL="$${rest##*|}"
+  echo "NOTE: [train $${MAJOR}] downloading Corretto $${VER} from $${URL}"
+  if curl -fL --retry 20 --retry-delay 8 --retry-all-errors --retry-connrefused \
+       --connect-timeout 10 -o "/tmp/corretto-$${MAJOR}.tar.gz" "$${URL}"; then
+    TOP=$(tar tzf "/tmp/corretto-$${MAJOR}.tar.gz" | head -1 | cut -d/ -f1)
+    tar xzf "/tmp/corretto-$${MAJOR}.tar.gz" -C /opt
+    echo "NOTE: [train $${MAJOR}] installed /opt/$${TOP}"
+    INSTALLED=$((INSTALLED + 1))
+    if [ "$${MAJOR}" = "$${DECODER_MAJOR}" ]; then
+      ln -sfn "/opt/$${TOP}" "$${APPDIR}/jdk"
+      echo "NOTE: decoder will run on train $${MAJOR} (/opt/$${TOP})"
+    fi
+  else
+    echo "ERROR: [train $${MAJOR}] Corretto download failed from $${URL}"
+    echo "ERROR:   verify the affected build string / URL in variables.tf (it may be pulled)."
+  fi
+done
+echo "$${INSTALLED}" > "$${APPDIR}/jdk_count"
+if [ -L "$${APPDIR}/jdk" ] && [ -x "$${APPDIR}/jdk/bin/java" ]; then
+  echo true > "$${APPDIR}/jdk_ok"
 else
-  JDK_OK=false
-  echo "ERROR: Corretto download failed from $${JDK_URL}"
-  echo "ERROR: verify the affected build string / URL in variables.tf (it may be pulled)."
+  echo false > "$${APPDIR}/jdk_ok"
+  echo "WARN: decoder JDK (train $${DECODER_MAJOR}) not installed — decoder will not start."
 fi
-echo "$${JDK_OK}" > "$${APPDIR}/jdk_ok"
 
 # ------------------------------------------------------------------------------
 # Sample Base64 decode service — the exposure surface
@@ -92,6 +108,7 @@ echo "$${JDK_OK}" > "$${APPDIR}/jdk_ok"
 cat > "$${APPDIR}/Decoder.java" <<'JAVA_EOF'
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
@@ -108,7 +125,7 @@ public class Decoder {
         System.out.println("java4shell decoder listening on " + port);
     }
 
-    private static void handle(HttpExchange ex) throws Exception {
+    private static void handle(HttpExchange ex) throws IOException {
         String data = null;
         String q = ex.getRequestURI().getRawQuery();
         if (q != null) {
@@ -150,7 +167,7 @@ JAVA_EOF
 # systemd unit for the decoder
 # The vuln node runs the JVM with NO mitigation so it is genuinely exposed.
 # The temporary pre-upgrade workarounds for CVE-2026-114938 are documented here;
-# patch.sh applies the real fix (the 21.0.13.1 upgrade) rather than a flag.
+# patch.sh applies the real fix (the version upgrade) rather than a flag.
 #
 #   Researcher / Red Hat RHSB-2026-018 stopgaps (either disables the vulnerable
 #   AVX-512 Base64 intrinsic):
@@ -186,7 +203,8 @@ sed -i "s|__DECODER_PORT__|$${DECODER_PORT}|" /etc/systemd/system/java4shell-dec
 # check-exposure.sh — the portable, read-only detector. Injected verbatim from
 # the repo file (instances.tf passes file("../check-exposure.sh")), so the node
 # runs the exact same script we ship and viewers lift. ALL detection logic is
-# here; nothing in this lab re-implements it.
+# here; nothing in this lab re-implements it. It already scans every installed
+# JDK, which is exactly why each node carries all three trains.
 # ------------------------------------------------------------------------------
 cat > "$${APPDIR}/check-exposure.sh" <<'DETECTOR_EOF'
 ${detector}
@@ -196,8 +214,9 @@ chmod +x "$${APPDIR}/check-exposure.sh"
 # ------------------------------------------------------------------------------
 # exposure-check.sh — thin lab wrapper. Runs the detector above, then publishes
 # this node's verdict as a page + Custom:Java4Shell SSM Inventory entry and
-# echoes the keys validate.sh / lab-verdicts.sh / patch.sh parse over SSM. It
-# holds no detection logic of its own.
+# echoes the keys validate.sh / lab-verdicts.sh / patch.sh parse over SSM,
+# INCLUDING one JVM| line per installed JDK so the operator tooling can show
+# every train's individual verdict. It holds no detection logic of its own.
 # ------------------------------------------------------------------------------
 cat > "$${APPDIR}/exposure-check.sh" <<'EXPOSURE_EOF'
 #!/bin/bash
@@ -217,14 +236,18 @@ VER=$(printf '%s\n'     "$${OUT}" | sed -n 's/^JAVA_VERSION=//p' | head -1)
 ARCH=$(printf '%s\n'    "$${OUT}" | sed -n 's/^ARCH=//p'         | head -1)
 VBMI=$(printf '%s\n'    "$${OUT}" | sed -n 's/^AVX512_VBMI=//p'  | head -1)
 REASON=$(printf '%s\n'  "$${OUT}" | sed -n 's/^REASON=//p'       | head -1)
+JVM_ROWS=$(printf '%s\n' "$${OUT}" | grep '^JVM|' || true)
+JDK_COUNT=$(printf '%s\n' "$${JVM_ROWS}" | grep -c '^JVM|installed' || true)
+INSTALLED_COUNT=$(cat "$${APPDIR}/jdk_count" 2>/dev/null || echo 0)
+
 [ -n "$${VERDICT}" ] || { VERDICT="UNKNOWN"; REASON="detector produced no verdict"; }
 [ -n "$${VER}" ] || VER="none"
-# A lab node is SUPPOSED to have a JDK. If the install failed, or the detector
-# found no JVM at all, say UNKNOWN — never let a missing runtime read as a
-# passing NOT_EXPOSED (that silently hid a broken download).
-if [ "$(cat $${APPDIR}/jdk_ok 2>/dev/null)" != "true" ] || [ "$${VER}" = "none" ]; then
+# A lab node is SUPPOSED to carry JDKs. If none installed, or the detector found
+# no JVM at all, say UNKNOWN — never let a missing runtime read as a passing
+# NOT_EXPOSED (that silently hid a broken download).
+if [ "$${INSTALLED_COUNT}" = "0" ] || [ "$${VER}" = "none" ]; then
   VERDICT="UNKNOWN"
-  REASON="JDK did not install - verify the affected Corretto build URL (it may be pulled)"
+  REASON="JDKs did not install - verify the affected Corretto build URLs (they may be pulled)"
   VER="none"
 fi
 MIT="no"; [ "$${VERDICT}" = "MITIGATED" ] && MIT="yes"
@@ -237,9 +260,17 @@ case "$${VERDICT}" in
   *)           COLOR="#8b949e"; GLYPH="&#x3F;" ;;
 esac
 
+# --- per-JDK fragments, built from the detector's installed JVM rows ---
+#     JVM|installed|<home>|<version>|<verdict>|<reason>
+JDKS_JSON=$(printf '%s\n' "$${JVM_ROWS}" | awk -F'|' \
+  '$2=="installed"{printf "%s{\"version\":\"%s\",\"verdict\":\"%s\"}",(n++?",":""),$4,$5} END{printf ""}')
+JDK_HTML=$(printf '%s\n' "$${JVM_ROWS}" | awk -F'|' \
+  '$2=="installed"{c=($5=="EXPOSED"?"#ff5c57":($5=="NOT_EXPOSED"?"#2ec28a":"#f2c163"));
+    printf "<tr><td class=\"l\">JDK %s</td><td class=\"v\" style=\"color:%s\">%s &rarr; %s</td></tr>\n",$4,c,$4,$5}')
+
 # --- verdict.json (for scripts) ---
 cat > /var/www/html/verdict.json <<JSON
-{"role":"$${NODE_ROLE}","deployment":"$${DEPLOYMENT}","java_version":"$${VER}","arch":"$${ARCH}","avx512_vbmi":"$${VBMI}","mitigated":"$${MIT}","verdict":"$${VERDICT}","expected":"$${EXPECTED}","reason":"$${REASON}"}
+{"role":"$${NODE_ROLE}","deployment":"$${DEPLOYMENT}","java_version":"$${VER}","arch":"$${ARCH}","avx512_vbmi":"$${VBMI}","mitigated":"$${MIT}","verdict":"$${VERDICT}","expected":"$${EXPECTED}","reason":"$${REASON}","jdk_count":"$${JDK_COUNT}","jdks":[$${JDKS_JSON}]}
 JSON
 
 # --- verdict page (reachable via SSM port-forward to :80) ---
@@ -271,9 +302,10 @@ cat > /var/www/html/index.html <<HTML
   <div class="reason">$${REASON}</div>
   <table>
     <tr><td class="l">Node</td><td class="v">$${NODE_ROLE}</td></tr>
-    <tr><td class="l">Java version</td><td class="v">$${VER}</td></tr>
     <tr><td class="l">Architecture</td><td class="v">$${ARCH}</td></tr>
     <tr><td class="l">AVX-512 VBMI</td><td class="v">$${VBMI}</td></tr>
+    <tr><td class="l">JDKs installed</td><td class="v">$${JDK_COUNT}</td></tr>
+    $${JDK_HTML}
     <tr><td class="l">Mitigation flag</td><td class="v">$${MIT}</td></tr>
     <tr><td class="l">Expected verdict</td><td class="v">$${EXPECTED}</td></tr>
   </table>
@@ -292,9 +324,11 @@ ITEMS=$(jq -nc \
   --arg t "$${CAPTURE}" --arg role "$${NODE_ROLE}" --arg ver "$${VER}" \
   --arg arch "$${ARCH}" --arg vbmi "$${VBMI}" --arg mit "$${MIT}" \
   --arg verdict "$${VERDICT}" --arg dep "$${DEPLOYMENT}" --arg reason "$${REASON}" \
+  --arg jdks "$${JDK_COUNT}" \
   '[{TypeName:"Custom:Java4Shell",SchemaVersion:"1.0",CaptureTime:$t,
      Content:[{NodeRole:$role,JavaVersion:$ver,Arch:$arch,Avx512Vbmi:$vbmi,
-               Mitigated:$mit,Verdict:$verdict,Deployment:$dep,Reason:$reason}]}]')
+               Mitigated:$mit,Verdict:$verdict,Deployment:$dep,Reason:$reason,
+               JdkCount:$jdks}]}]')
 aws ssm put-inventory --region "$${REGION}" --instance-id "$${IID}" --items "$${ITEMS}" \
   && echo "NOTE: published Custom:Java4Shell inventory for $${IID}" \
   || echo "WARN: put-inventory failed (verdict page is still authoritative)"
@@ -308,6 +342,9 @@ echo "MITIGATED=$${MIT}"
 echo "VERDICT=$${VERDICT}"
 echo "EXPECTED=$${EXPECTED}"
 echo "REASON=$${REASON}"
+echo "JDK_COUNT=$${JDK_COUNT}"
+# One line per installed JDK: JVM|installed|<home>|<version>|<verdict>|<reason>
+printf '%s\n' "$${JVM_ROWS}"
 EXPOSURE_EOF
 chmod +x "$${APPDIR}/exposure-check.sh"
 
@@ -318,16 +355,16 @@ systemctl daemon-reload
 systemctl enable apache2
 systemctl restart apache2
 
-if [ "$${JDK_OK}" = "true" ]; then
+if [ "$(cat $${APPDIR}/jdk_ok 2>/dev/null)" = "true" ]; then
   echo "NOTE: starting decoder service..."
   systemctl enable java4shell-decoder
   systemctl restart java4shell-decoder
 else
-  echo "WARN: skipping decoder start — no JDK."
+  echo "WARN: skipping decoder start — decoder JDK not present."
 fi
 
 # Compute and publish the first verdict
 echo "NOTE: computing initial exposure verdict..."
 "$${APPDIR}/exposure-check.sh" || true
 
-echo "NOTE: userdata complete for node $${NODE_ROLE}."
+echo "NOTE: userdata complete for node $${NODE_ROLE} ($${INSTALLED} JDK(s) installed)."

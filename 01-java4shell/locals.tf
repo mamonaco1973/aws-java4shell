@@ -16,108 +16,119 @@ locals {
   # Base name every resource builds on, e.g. "java4shell-k3n8q2"
   name = "java4shell-${random_string.suffix.result}"
 
-  # ------------------------------------------------------------------------------
-  # Corretto download URLs, assembled from the build strings in variables.tf.
-  # Corretto's archive layout is stable and predictable, so we only ever edit
-  # the build string, never the URL shape.
-  # ------------------------------------------------------------------------------
   corretto_base = "https://corretto.aws/downloads/resources"
 
-  affected_x64_derived = "${local.corretto_base}/${var.corretto_affected_build}/amazon-corretto-${var.corretto_affected_build}-linux-x64.tar.gz"
-  affected_arm_derived = "${local.corretto_base}/${var.corretto_affected_build}/amazon-corretto-${var.corretto_affected_build}-linux-aarch64.tar.gz"
-  fixed_x64_url        = "${local.corretto_base}/${var.corretto_fixed_build}/amazon-corretto-${var.corretto_fixed_build}-linux-x64.tar.gz"
-  jdk17_x64_url        = "${local.corretto_base}/${var.corretto_jdk17_build}/amazon-corretto-${var.corretto_jdk17_build}-linux-x64.tar.gz"
-  jdk17_fixed_x64_url  = "${local.corretto_base}/${var.corretto_jdk17_fixed_build}/amazon-corretto-${var.corretto_jdk17_fixed_build}-linux-x64.tar.gz"
-  jdk25_x64_url        = "${local.corretto_base}/${var.corretto_jdk25_build}/amazon-corretto-${var.corretto_jdk25_build}-linux-x64.tar.gz"
-  jdk25_fixed_x64_url  = "${local.corretto_base}/${var.corretto_jdk25_fixed_build}/amazon-corretto-${var.corretto_jdk25_fixed_build}-linux-x64.tar.gz"
-
-  # Each affected node and the fixed build patch.sh upgrades IT to — its own
-  # train's fix, so patching 17 installs 17.0.21.1, 21 installs 21.0.13.1, and
-  # 25 installs 25.0.5.1. patch.sh reads this (via the patch_urls output), loops.
-  patch_urls = {
-    "vuln-jdk21" = local.fixed_x64_url
-    "vuln-jdk17" = local.jdk17_fixed_x64_url
-    "vuln-jdk25" = local.jdk25_fixed_x64_url
+  # ------------------------------------------------------------------------------
+  # The three affected JDK trains and their fixes, read from variables.tf.
+  #
+  # Each lab node installs the AFFECTED build of ALL THREE trains (17 / 21 / 25);
+  # patch.sh installs the FIXED build of all three. The detector keys off the
+  # upstream version in each JDK's own release file, so these build strings are
+  # what decide the per-train verdict — the lab does not hardcode a single JDK.
+  # ------------------------------------------------------------------------------
+  trains = {
+    "17" = {
+      affected_build   = var.corretto_jdk17_build
+      affected_version = var.jdk17_version
+      fixed_build      = var.corretto_jdk17_fixed_build
+    }
+    "21" = {
+      affected_build   = var.corretto_affected_build
+      affected_version = var.affected_version
+      fixed_build      = var.corretto_fixed_build
+    }
+    "25" = {
+      affected_build   = var.corretto_jdk25_build
+      affected_version = var.jdk25_version
+      fixed_build      = var.corretto_jdk25_fixed_build
+    }
   }
 
-  # Allow a self-hosted override for the (often-pulled) vulnerable x64 build.
-  affected_x64_url = var.corretto_affected_url_override != "" ? var.corretto_affected_url_override : local.affected_x64_derived
+  # Corretto's archive layout is stable and predictable, so we only ever edit the
+  # build string. URLs are assembled inline per list (Terraform has no local
+  # functions). The often-pulled vulnerable 21 x64 build honours an override.
+  affected_jdks_x64 = [
+    for major, t in local.trains : {
+      major   = major
+      version = t.affected_version
+      url = (major == "21" && var.corretto_affected_url_override != "") ? var.corretto_affected_url_override : (
+      "${local.corretto_base}/${t.affected_build}/amazon-corretto-${t.affected_build}-linux-x64.tar.gz")
+    }
+  ]
+  affected_jdks_arm = [
+    for major, t in local.trains : {
+      major   = major
+      version = t.affected_version
+      url     = "${local.corretto_base}/${t.affected_build}/amazon-corretto-${t.affected_build}-linux-aarch64.tar.gz"
+    }
+  ]
+  fixed_jdks_x64 = [
+    for major, t in local.trains : {
+      major = major
+      url   = "${local.corretto_base}/${t.fixed_build}/amazon-corretto-${t.fixed_build}-linux-x64.tar.gz"
+    }
+  ]
+  fixed_jdks_arm = [
+    for major, t in local.trains : {
+      major = major
+      url   = "${local.corretto_base}/${t.fixed_build}/amazon-corretto-${t.fixed_build}-linux-aarch64.tar.gz"
+    }
+  ]
+
+  # The train the exposure-surface decoder service runs on (the others are still
+  # installed and still judged by the detector — they just aren't the live app).
+  decoder_major = var.decoder_train
 
   # ------------------------------------------------------------------------------
   # Node definitions — the one place that describes every machine.
-  # instances.tf iterates this map, and each node's userdata is rendered from
-  # the shared template with these values. "expected" is the verdict the lab is
-  # designed to produce, so validate.sh can assert reality against intent.
+  # Three nodes, one per CPU class, each carrying ALL THREE vulnerable trains:
   #
-  #   role         friendly node name / inventory key
-  #   ami          architecture-matched Ubuntu AMI
-  #   instance     instance type
-  #   subnet       which private subnet
-  #   jdk_url      Corretto tarball this node installs
-  #   jdk_version  upstream version that tarball reports (for the verdict label)
-  #   expected     EXPOSED | NOT_EXPOSED — what the node should decide at boot
-  #   reason       why, in one phrase, for the page and validation output
+  #   vuln-x86    c7i.large  x86-64 WITH AVX-512 VBMI   -> EXPOSED
+  #   safe-arm    t4g.micro  Graviton ARM64 (no VBMI)   -> NOT_EXPOSED (CPU-immune)
+  #   safe-intel  t3.micro   x86-64 WITHOUT AVX-512 VBMI-> NOT_EXPOSED (CPU-immune)
+  #
+  # The three nodes carry the same three vulnerable JDKs; only the CPU differs,
+  # which is the whole point — exposure is CPU-bound, so the detector must find
+  # all three JDKs AND gate on the instruction set. instances.tf iterates this
+  # map; each node's userdata installs its arch-matched `jdks` list.
   # ------------------------------------------------------------------------------
   nodes = {
-    "vuln-jdk21" = {
-      role        = "vuln-jdk21"
-      ami         = data.aws_ami.ubuntu_x86.id
-      instance    = var.x86_instance_type
-      subnet      = aws_subnet.private_a.id
-      jdk_url     = local.affected_x64_url
-      jdk_version = var.affected_version
-      expected    = "EXPOSED"
-      reason      = "vulnerable JDK on an AVX-512 VBMI CPU"
+    "vuln-x86" = {
+      role     = "vuln-x86"
+      ami      = data.aws_ami.ubuntu_x86.id
+      instance = var.x86_instance_type
+      subnet   = aws_subnet.private_a.id
+      arch     = "x64"
+      jdks     = local.affected_jdks_x64
+      expected = "EXPOSED"
+      reason   = "three vulnerable JDK trains (17/21/25) on an AVX-512 VBMI CPU"
     }
     "safe-arm" = {
-      role        = "safe-arm"
-      ami         = data.aws_ami.ubuntu_arm.id
-      instance    = var.arm_instance_type
-      subnet      = aws_subnet.private_b.id
-      jdk_url     = local.affected_arm_derived
-      jdk_version = var.affected_version
-      expected    = "NOT_EXPOSED"
-      reason      = "same vulnerable JDK, but ARM64 has no AVX-512 VBMI intrinsic"
+      role     = "safe-arm"
+      ami      = data.aws_ami.ubuntu_arm.id
+      instance = var.arm_instance_type
+      subnet   = aws_subnet.private_b.id
+      arch     = "aarch64"
+      jdks     = local.affected_jdks_arm
+      expected = "NOT_EXPOSED"
+      reason   = "same three vulnerable trains, but ARM64 has no AVX-512 VBMI intrinsic"
     }
-    # No pre-patched node: the "a fix flips the verdict" lesson is earned live by
-    # running ./patch.sh on a vuln node and re-checking, not baked in at boot.
-    # x86, same vulnerable Java as vuln-jdk21 — but an OLDER Intel chip with no
-    # AVX-512 VBMI, so it is immune by hardware. Proves "not all x86", only the
-    # chips that carry the instruction.
     "safe-intel" = {
-      role        = "safe-intel"
-      ami         = data.aws_ami.ubuntu_x86.id
-      instance    = var.intel_novbmi_instance_type
-      subnet      = aws_subnet.private_a.id
-      jdk_url     = local.affected_x64_url
-      jdk_version = var.affected_version
-      expected    = "NOT_EXPOSED"
-      reason      = "x86, but this Intel chip has no AVX-512 VBMI instruction"
+      role     = "safe-intel"
+      ami      = data.aws_ami.ubuntu_x86.id
+      instance = var.intel_novbmi_instance_type
+      subnet   = aws_subnet.private_a.id
+      arch     = "x64"
+      jdks     = local.affected_jdks_x64
+      expected = "NOT_EXPOSED"
+      reason   = "x86, but this Intel chip has no AVX-512 VBMI instruction"
     }
-    # A SECOND affected train on a VBMI CPU: vulnerable Java 17, which must come
-    # back EXPOSED by the 17 threshold (17.0.21.1), proving the detector is not
-    # hardcoded to the 21 line.
-    "vuln-jdk17" = {
-      role        = "vuln-jdk17"
-      ami         = data.aws_ami.ubuntu_x86.id
-      instance    = var.x86_instance_type
-      subnet      = aws_subnet.private_a.id
-      jdk_url     = local.jdk17_x64_url
-      jdk_version = var.jdk17_version
-      expected    = "EXPOSED"
-      reason      = "vulnerable Java 17 on an AVX-512 VBMI CPU (a second affected train)"
-    }
-    # A THIRD affected train: vulnerable Java 25 (current LTS), EXPOSED by the
-    # 25 threshold (25.0.5.1). Three different trains, one detector.
-    "vuln-jdk25" = {
-      role        = "vuln-jdk25"
-      ami         = data.aws_ami.ubuntu_x86.id
-      instance    = var.x86_instance_type
-      subnet      = aws_subnet.private_a.id
-      jdk_url     = local.jdk25_x64_url
-      jdk_version = var.jdk25_version
-      expected    = "EXPOSED"
-      reason      = "vulnerable Java 25 on an AVX-512 VBMI CPU (a third affected train)"
-    }
+  }
+
+  # patch.sh target map: role -> the FIXED build of every train, arch-matched.
+  # Patching a node upgrades all three trains and removes the vulnerable ones.
+  patch_jdks = {
+    for role, node in local.nodes :
+    role => (node.arch == "aarch64" ? local.fixed_jdks_arm : local.fixed_jdks_x64)
   }
 }

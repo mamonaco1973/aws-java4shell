@@ -16,7 +16,7 @@ output "region" {
   value       = var.region
 }
 
-# Map of role -> instance ID, e.g. {"vuln-jdk21" = "i-0abc...", ...}
+# Map of role -> instance ID, e.g. {"vuln-x86" = "i-0abc...", ...}
 output "node_ids" {
   description = "Instance ID for each lab node, keyed by role"
   value       = { for role, inst in aws_instance.node : role => inst.id }
@@ -28,31 +28,33 @@ output "node_private_ips" {
   value       = { for role, inst in aws_instance.node : role => inst.private_ip }
 }
 
-# Map of role -> the verdict the lab is designed to produce. validate.sh
-# asserts the live verdict against this.
+# Map of role -> the verdict the lab is designed to produce. validate.sh asserts
+# the live verdict against this; patch.sh patches the EXPOSED ones by default.
 output "node_expected" {
   description = "Intended exposure verdict for each node, keyed by role"
   value       = { for role, node in local.nodes : role => node.expected }
 }
 
-# The 21-train fixed URL (kept for reference / the single-node path).
-output "fixed_jdk_url" {
-  description = "Corretto URL of the patched 21 JDK"
-  value       = local.fixed_x64_url
+# Which train the decoder runs on, and therefore the JDK symlink patch.sh
+# repoints to the fixed build.
+output "decoder_major" {
+  description = "Major version the exposure-surface decoder service runs on"
+  value       = local.decoder_major
 }
 
-# Per-node fix URLs — patch.sh upgrades each affected node to ITS OWN train's
-# fixed build (21.0.13.1.2 for vuln-jdk21, 17.0.21.1.2 for vuln-jdk17).
-output "patch_urls" {
-  description = "Map of affected node role -> the fixed Corretto URL patch.sh installs on it"
-  value       = local.patch_urls
+# Map of role -> the AFFECTED JDK list that node installs (major/version/url).
+# Print it to confirm every vulnerable build still resolves (HTTP 200) before
+# trusting the verdicts. check_env.sh HEAD-checks these before apply.
+output "affected_jdks" {
+  description = "Affected JDK trains installed on each node (major, version, url)"
+  value       = { for role, node in local.nodes : role => node.jdks }
 }
 
-# The affected JDK URL actually in effect — print it so you can confirm it
-# resolves (HTTP 200) before trusting the vuln-jdk21 verdict. See variables.tf.
-output "affected_jdk_url" {
-  description = "Corretto URL the vuln-jdk21 / safe-arm nodes download — VERIFY this resolves"
-  value       = local.affected_x64_url
+# Map of role -> the FIXED JDK list patch.sh installs on that node, arch-matched.
+# patch.sh upgrades every train and removes the vulnerable builds.
+output "patch_jdks" {
+  description = "Fixed Corretto builds patch.sh installs on each node (major, url)"
+  value       = local.patch_jdks
 }
 
 output "ssm_portforward_hint" {

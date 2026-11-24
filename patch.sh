@@ -2,13 +2,13 @@
 set -uo pipefail
 
 # ================================================================================
-# patch.sh — remediate the vulnerable nodes in place
-# Upgrades each affected node to ITS OWN train's fixed Corretto build over SSM,
-# restarts the decoder on the new runtime, and re-runs the on-box exposure check
-# to confirm the verdict flips EXPOSED -> NOT_EXPOSED. Oracle patched 17, 21, 25
-# and 27 together on 2026-11-17, so vuln-jdk21 upgrades to 21.0.13.1 and
-# vuln-jdk17 to 17.0.21.1 — each node gets the fix for its line, never a cross-
-# train swap. The role -> fixed URL map comes from the patch_urls output.
+# patch.sh — remediate a node in place by upgrading its JDKs
+# Every node carries all three affected trains (17 / 21 / 25). This script
+# downloads each train's FIXED Corretto build over SSM, installs it, repoints the
+# decoder's JDK symlink to the fixed decoder train, REMOVES the vulnerable builds
+# (the detector scans every installed JDK, so a lingering vulnerable one keeps the
+# host EXPOSED), restarts the decoder, and re-runs the on-box exposure check to
+# confirm the verdict flips EXPOSED -> NOT_EXPOSED.
 #
 # Why an upgrade and not a flag:
 #   The documented TEMPORARY workarounds for CVE-2026-114938 disable the
@@ -16,12 +16,14 @@ set -uo pipefail
 #       -XX:+UnlockDiagnosticVMOptions -XX:-UseBASE64Intrinsics
 #       -XX:UseAVX=2            (x86-only; keeps AVX2, drops AVX-512)
 #   They are stopgaps — Oracle's guidance, and this script, apply the real fix:
-#   the patched runtime. (The flags are shown, commented, in the decoder's
-#   systemd unit if you want to demo the MITIGATED state before patching.)
+#   the patched runtime.
 #
 # Usage:
-#   ./patch.sh                 # patches every affected node (vuln-jdk21, vuln-jdk17)
-#   ./patch.sh vuln-jdk17      # patches a named node
+#   ./patch.sh                       # patch every EXPOSED node, all three trains
+#   ./patch.sh vuln-x86              # patch a named node, all three trains
+#   ./patch.sh vuln-x86 17           # patch ONLY train 17 on vuln-x86 (demo a
+#                                    #   mixed host: 17 fixed, 21/25 still EXPOSED)
+#   ./patch.sh vuln-x86 17 25        # patch trains 17 and 25, leave 21 vulnerable
 # ================================================================================
 
 CHDIR="01-java4shell"
@@ -32,13 +34,23 @@ if [ -z "${REGION}" ]; then
 fi
 
 NODE_IDS=$(terraform -chdir="$CHDIR" output -json node_ids)
-PATCH_URLS=$(terraform -chdir="$CHDIR" output -json patch_urls)
+PATCH_JDKS=$(terraform -chdir="$CHDIR" output -json patch_jdks)
+NODE_EXPECTED=$(terraform -chdir="$CHDIR" output -json node_expected)
+DECODER_MAJOR=$(terraform -chdir="$CHDIR" output -raw decoder_major)
 
-# Targets: the roles given, or every affected node that has a fix URL.
+# Arg parsing: optional first arg is a role; any remaining args are train majors
+# to restrict the patch to. With no role, patch every node the lab expects to be
+# EXPOSED (there is nothing to flip on a CPU-immune node).
+TRAINS=()
 if [ "$#" -gt 0 ]; then
-  ROLES=("$@")
+  ROLES=("$1"); shift
+  TRAINS=("$@")
 else
-  mapfile -t ROLES < <(echo "${PATCH_URLS}" | jq -r 'keys[]')
+  mapfile -t ROLES < <(echo "${NODE_EXPECTED}" | jq -r 'to_entries[] | select(.value=="EXPOSED") | .key')
+  if [ "${#ROLES[@]}" -eq 0 ]; then
+    echo "NOTE: no node is expected EXPOSED; nothing to patch. Name a node to force it."
+    exit 0
+  fi
 fi
 
 # Run a command on an instance over SSM and echo its stdout.
@@ -55,16 +67,24 @@ run_onbox() {
     --query 'StandardOutputContent' --output text
 }
 
-# Patch one node with its own train's fixed build. Returns non-zero on failure.
 patch_one() {
-  local role="$1" id url out new_verdict new_java
+  local role="$1" id jq_filter jlist out new_verdict new_java
+
   id=$(echo "${NODE_IDS}" | jq -r --arg r "${role}" '.[$r] // empty')
-  url=$(echo "${PATCH_URLS}" | jq -r --arg r "${role}" '.[$r] // empty')
   if [ -z "${id}" ]; then
     echo "ERROR: no node named '${role}' in this deployment."; return 1
   fi
-  if [ -z "${url}" ]; then
-    echo "ERROR: '${role}' has no fixed build (only affected nodes are patchable)."
+
+  # "major url" lines for the fixed builds, optionally filtered to TRAINS.
+  if [ "${#TRAINS[@]}" -gt 0 ]; then
+    jq_filter=$(printf '%s\n' "${TRAINS[@]}" | jq -R . | jq -s 'map(tostring)')
+    jlist=$(echo "${PATCH_JDKS}" | jq -r --arg r "${role}" --argjson keep "${jq_filter}" \
+      '.[$r][] | select(.major as $m | $keep | index($m)) | "\(.major) \(.url)"')
+  else
+    jlist=$(echo "${PATCH_JDKS}" | jq -r --arg r "${role}" '.[$r][] | "\(.major) \(.url)"')
+  fi
+  if [ -z "${jlist}" ]; then
+    echo "ERROR: '${role}' has no fixed builds matching trains: ${TRAINS[*]:-all}."
     return 1
   fi
 
@@ -72,30 +92,53 @@ patch_one() {
   echo "NOTE: ${role} (${id}) — verdict BEFORE patch:"
   ./lab-verdicts.sh "${role}"
 
-  # On-box remediation: download this train's fix, repoint the JDK symlink the
-  # decoder runs from, restart on the new runtime, and refresh the verdict.
+  # On-box remediation. JLIST and DECODER_MAJOR are expanded HERE by patch.sh;
+  # everything else ($VAR) stays literal for the remote shell.
+  #
+  # NOTE: SSM AWS-RunShellScript runs this under /bin/sh (dash), not bash, so the
+  # remote half must stay POSIX — no here-strings, mapfile, or [[ ]]. The JDK
+  # list goes through a temp file (not `<<<`), which also keeps the loop in the
+  # current shell so NEWDIRS survives for the prune step.
   local patch_cmd
   read -r -d '' patch_cmd <<PATCH || true
 set -e
 cd /tmp
-OLD=\$(readlink -f /opt/java4shell/jdk 2>/dev/null || true)
-echo "downloading fixed JDK: ${url}"
-curl -fL --retry 20 --retry-delay 8 --retry-all-errors --retry-connrefused --connect-timeout 10 -o corretto-fixed.tar.gz "${url}"
-TOP=\$(tar tzf corretto-fixed.tar.gz | head -1 | cut -d/ -f1)
-tar xzf corretto-fixed.tar.gz -C /opt
-ln -sfn /opt/\$TOP /opt/java4shell/jdk
+DECODER_MAJOR="${DECODER_MAJOR}"
+cat > /tmp/j4s_jlist.txt <<'JLIST_EOF'
+${jlist}
+JLIST_EOF
+OLD=\$(ls -d /opt/amazon-corretto-* 2>/dev/null || true)
+NEWDIRS=""
+while read -r MAJOR URL; do
+  [ -n "\$MAJOR" ] || continue
+  echo "downloading fixed train \$MAJOR: \$URL"
+  curl -fL --retry 20 --retry-delay 8 --retry-all-errors --retry-connrefused --connect-timeout 10 -o "fixed-\$MAJOR.tar.gz" "\$URL"
+  TOP=\$(tar tzf "fixed-\$MAJOR.tar.gz" | head -1 | cut -d/ -f1)
+  tar xzf "fixed-\$MAJOR.tar.gz" -C /opt
+  NEWDIRS="\$NEWDIRS /opt/\$TOP"
+  if [ "\$MAJOR" = "\$DECODER_MAJOR" ]; then ln -sfn "/opt/\$TOP" /opt/java4shell/jdk; fi
+done < /tmp/j4s_jlist.txt
 echo true > /opt/java4shell/jdk_ok
-# Remove the old vulnerable JDK. The detector scans EVERY installed JDK and
-# takes the worst verdict, so an idle vulnerable runtime left under /opt would
-# keep the host EXPOSED even after the service restarts on the fixed build —
-# exactly what a real upgrade removes.
-if [ -n "\$OLD" ] && [ "\$OLD" != "/opt/\$TOP" ] && \
-   printf '%s' "\$OLD" | grep -q '^/opt/'; then rm -rf "\$OLD"; fi
+# Remove the vulnerable builds for the trains we just patched: any old
+# amazon-corretto-* dir whose major matches a patched train and that is not one
+# of the freshly installed fixed dirs. Trains we did NOT patch are left in place
+# (so a partial patch deliberately leaves the host EXPOSED on those).
+PATCHED_MAJORS=\$(awk '{print \$1}' /tmp/j4s_jlist.txt)
+for d in \$OLD; do
+  case " \$NEWDIRS " in *" \$d "*) continue;; esac
+  dmaj=\$(basename "\$d" | sed -n 's/^amazon-corretto-\([0-9]*\)\..*/\1/p')
+  for m in \$PATCHED_MAJORS; do
+    if [ "\$dmaj" = "\$m" ]; then rm -rf "\$d"; break; fi
+  done
+done
+# Recount installed JDKs so the wrapper's UNKNOWN gate stays honest.
+ls -d /opt/amazon-corretto-* 2>/dev/null | wc -l > /opt/java4shell/jdk_count
 systemctl restart java4shell-decoder
 /opt/java4shell/exposure-check.sh
 PATCH
 
-  echo "NOTE: applying fix on ${role} (download + swap + restart + re-check)..."
+  echo "NOTE: applying fix on ${role} (download + install + swap + prune + re-check)..."
+  echo "      trains: ${TRAINS[*]:-all (17 21 25)}"
   out=$(run_onbox "${id}" "${patch_cmd}")
   new_verdict=$(echo "${out}" | sed -n 's/^VERDICT=//p')
   new_java=$(echo "${out}"    | sed -n 's/^JAVA_VERSION=//p')
@@ -103,8 +146,15 @@ PATCH
   echo "---------------------------------------------------------------------------------"
   printf '  %-12s Java now: %-11s Verdict now: %s\n' "${role}" \
     "${new_java:-?}" "${new_verdict:-?}"
+  echo "  Per-JDK after patch:"
+  echo "${out}" | sed -n 's/^JVM|installed|[^|]*|\([^|]*\)|\([^|]*\)|.*/    \1  ->  \2/p'
   if [ "${new_verdict}" = "NOT_EXPOSED" ]; then
     echo "  SUCCESS: ${role} is no longer exposed to CVE-2026-114938."
+    return 0
+  fi
+  if [ "${#TRAINS[@]}" -gt 0 ]; then
+    echo "  NOTE: partial patch (${TRAINS[*]}) — ${role} is still '${new_verdict}' because"
+    echo "        the untouched train(s) remain vulnerable. Re-run with no train filter to fully patch."
     return 0
   fi
   echo "  WARNING: expected NOT_EXPOSED, got '${new_verdict:-?}'. Full output:"
@@ -121,7 +171,7 @@ for role in "${ROLES[@]}"; do
 done
 echo ""
 echo "================================================================================="
-[ "${rc}" -eq 0 ] && echo "  RESULT: all targeted nodes are patched and NOT_EXPOSED." \
+[ "${rc}" -eq 0 ] && echo "  RESULT: all targeted nodes patched as requested." \
   || echo "  RESULT: one or more nodes did not reach NOT_EXPOSED — see above."
 echo "================================================================================="
 exit "${rc}"

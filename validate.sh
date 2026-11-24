@@ -3,8 +3,11 @@
 # File: validate.sh
 # Confirms the lab deployed as intended: each node's LIVE exposure verdict must
 # match the verdict it was designed to produce (locals.tf -> node_expected).
-#   vuln-jdk21     EXPOSED       (vulnerable JDK + AVX-512 VBMI CPU)
-#   safe-arm     NOT_EXPOSED   (same JDK, but ARM64 has no VBMI intrinsic)
+# Every node carries all three affected trains (17 / 21 / 25); the per-JDK rows
+# below each node show the detector judged every one.
+#   vuln-x86     EXPOSED       (3 vulnerable JDKs + AVX-512 VBMI CPU)
+#   safe-arm     NOT_EXPOSED   (same 3 JDKs, but ARM64 has no VBMI intrinsic)
+#   safe-intel   NOT_EXPOSED   (same 3 JDKs, but this Intel chip has no VBMI)
 # ===============================================================================
 
 set -uo pipefail
@@ -12,6 +15,11 @@ set -uo pipefail
 CHDIR="01-java4shell"
 POLL=10
 TIMEOUT=600
+# Cloud-init (package install + JDK download over NAT) runs well past the moment
+# the SSM agent reports Online, so it gets its own, more generous budget. The
+# detector script is not written until user data finishes, so collecting a
+# verdict before this completes reads an empty "?" on every node.
+CLOUD_INIT_TIMEOUT=1200
 
 # ------------------------------------------------------------------------------
 # Deploy timing — DEPLOY_START is exported by apply.sh so the headline number
@@ -46,6 +54,25 @@ wait_online() {
   done
 }
 
+wait_cloudinit() {
+  # Block until this node's user data has finished. SSM Online only means the
+  # agent is up; the JDK install and the detector script land minutes later. We
+  # poll `cloud-init status` rather than the script path so an install that ends
+  # in error/degraded still releases the wait (the verdict then reflects that,
+  # e.g. UNKNOWN, instead of hanging).
+  local id="$1" elapsed=0 status
+  while true; do
+    status=$(run_onbox "${id}" "cloud-init status 2>/dev/null | sed -n 's/^status: //p'")
+    case "${status}" in
+      done|error|degraded|disabled) return 0 ;;
+    esac
+    elapsed=$((elapsed + POLL))
+    [ "${elapsed}" -ge "${CLOUD_INIT_TIMEOUT}" ] && return 1
+    echo "NOTE: ${id} user data still running (cloud-init: ${status:-?}) — waiting ${POLL}s (${elapsed}s)..."
+    sleep "${POLL}"
+  done
+}
+
 run_onbox() {
   local id="$1" cmd="$2" cid params
   params=$(jq -nc --arg c "${cmd}" '{commands:[$c]}')
@@ -69,9 +96,19 @@ for role in "${ROLES[@]}"; do
 done
 T_ONLINE=$(date +%s)
 
+echo "NOTE: Waiting for user data (package + JDK install) to finish on all nodes..."
+for role in "${ROLES[@]}"; do
+  id=$(echo "${NODE_IDS_JSON}" | jq -r --arg r "${role}" '.[$r]')
+  if ! wait_cloudinit "${id}"; then
+    echo "ERROR: ${role} (${id}) user data did not finish within ${CLOUD_INIT_TIMEOUT}s."
+    echo "       Check /root/userdata.log on the node over SSM."
+    exit 1
+  fi
+done
+
 echo "NOTE: Collecting exposure verdicts..."
 echo ""
-printf '%-14s %-12s %-12s %-10s %-6s %s\n' "NODE" "VERDICT" "EXPECTED" "JAVA" "VBMI" "RESULT"
+printf '%-12s %-12s %-12s %-6s %-5s %s\n' "NODE" "VERDICT" "EXPECTED" "VBMI" "JDKS" "RESULT"
 printf -- '---------------------------------------------------------------------------------------\n'
 
 FAIL=0
@@ -79,9 +116,9 @@ for role in "${ROLES[@]}"; do
   id=$(echo "${NODE_IDS_JSON}"  | jq -r --arg r "${role}" '.[$r]')
   want=$(echo "${EXPECTED_JSON}" | jq -r --arg r "${role}" '.[$r]')
   out=$(run_onbox "${id}" "/opt/java4shell/exposure-check.sh")
-  got=$(echo "${out}"  | sed -n 's/^VERDICT=//p')
-  java=$(echo "${out}" | sed -n 's/^JAVA_VERSION=//p')
-  vbmi=$(echo "${out}" | sed -n 's/^AVX512_VBMI=//p')
+  got=$(echo "${out}"   | sed -n 's/^VERDICT=//p')
+  vbmi=$(echo "${out}"  | sed -n 's/^AVX512_VBMI=//p')
+  count=$(echo "${out}" | sed -n 's/^JDK_COUNT=//p')
 
   if [ "${got}" = "${want}" ]; then
     result="PASS"
@@ -89,13 +126,17 @@ for role in "${ROLES[@]}"; do
     result="FAIL"
     FAIL=$((FAIL + 1))
   fi
-  printf '%-14s %-12s %-12s %-10s %-6s %s\n' \
-    "${role}" "${got:-?}" "${want}" "${java:-?}" "${vbmi:-?}" "${result}"
+  printf '%-12s %-12s %-12s %-6s %-5s %s\n' \
+    "${role}" "${got:-?}" "${want}" "${vbmi:-?}" "${count:-?}" "${result}"
+
+  # Per-JDK breakdown — proves the detector judged every installed train.
+  #   JVM|installed|<home>|<version>|<verdict>|<reason>
+  echo "${out}" | sed -n 's/^JVM|installed|[^|]*|\([^|]*\)|\([^|]*\)|.*/                 \1  ->  \2/p'
 
   if [ "${got}" = "UNKNOWN" ]; then
-    echo "      ^ JDK install failed on ${role}. The vulnerable Corretto build URL"
-    echo "        is likely pulled. Check 'terraform -chdir=${CHDIR} output affected_jdk_url',"
-    echo "        confirm it returns HTTP 200, or set corretto_affected_url_override."
+    echo "      ^ JDK install failed on ${role}. A vulnerable Corretto build URL is likely"
+    echo "        pulled. Check 'terraform -chdir=${CHDIR} output affected_jdks', confirm each"
+    echo "        returns HTTP 200, or set corretto_affected_url_override."
   fi
 done
 
