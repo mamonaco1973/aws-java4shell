@@ -24,6 +24,16 @@ resource "aws_instance" "node" {
   vpc_security_group_ids = [aws_security_group.node.id]
   iam_instance_profile   = aws_iam_instance_profile.ssm.name
 
+  # Do not launch until egress exists. aws_nat_gateway blocks until the gateway
+  # is "available" (~1-2 min) and the private route table association points the
+  # subnet at it, so user data's JDK download has a working route from the first
+  # second — instead of racing a NAT that is still coming up.
+  depends_on = [
+    aws_nat_gateway.main,
+    aws_route_table_association.private_a,
+    aws_route_table_association.private_b,
+  ]
+
   # Private subnet — never a public IP. SSM is the only way in.
   associate_public_ip_address = false
 
