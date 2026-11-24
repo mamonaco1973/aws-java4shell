@@ -95,21 +95,21 @@ variable "corretto_affected_url_override" {
 }
 
 # A SECOND affected train, to prove the detector is not hardcoded to Java 21 and
-# that patch.sh upgrades each train to ITS OWN fix. Oracle patched 17 alongside
-# 21/25/27 on 2026-11-17: the fix is 17.0.21.1 (Corretto 17.0.21.1.2), and the
-# last affected build is 17.0.21.0.3 (upstream 17.0.21). Verify both URLs return
-# HTTP 200 before apply, as with the 21 builds. Sources: watchTowr, Cycode,
-# TuxCare write-ups on CVE-2026-114938 (not primary Oracle/OpenJDK advisories).
+# that patch.sh upgrades each train to ITS OWN fix. The fix is 17.0.21.1
+# (Corretto 17.0.21.1.2, verified HTTP 200). For the affected build we use
+# 17.0.13.11.1 (upstream 17.0.13) — a real Corretto 17 build that still resolves
+# and sits below the 17.0.21.1 threshold, so it reads EXPOSED. (The advisory's
+# "17.0.21.0.3" tag returns 403 on the Corretto archive; always verify.)
 variable "corretto_jdk17_build" {
-  description = "Corretto 17 build for the AFFECTED Java 17 node (reports 17.0.21, below the fix)"
+  description = "Corretto 17 build for the AFFECTED Java 17 node (reports 17.0.13, below the fix)"
   type        = string
-  default     = "17.0.21.0.3"
+  default     = "17.0.13.11.1"
 }
 
 variable "jdk17_version" {
   description = "Upstream version the affected Corretto 17 build reports"
   type        = string
-  default     = "17.0.21"
+  default     = "17.0.13"
 }
 
 variable "corretto_jdk17_fixed_build" {

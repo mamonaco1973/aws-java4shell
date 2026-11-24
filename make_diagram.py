@@ -103,7 +103,7 @@ NODES.update({
     "v21":   (COL[0], ROW[2], "danger", "cpu", "vuln-jdk21",
               "c7i x86 . 21.0.13 . EXPOSED"),
     "v17":   (COL[1], ROW[2], "danger", "cpu", "vuln-jdk17",
-              "c7i x86 . 17.0.21 . EXPOSED"),
+              "c7i x86 . 17.0.13 . EXPOSED"),
     "v25":   (COL[2], ROW[2], "danger", "cpu", "vuln-jdk25",
               "c7i x86 . 25.0.5 . EXPOSED"),
     # Two immune nodes — same vulnerable Java, but no AVX-512 VBMI to fire it.
@@ -149,7 +149,7 @@ ALT = ("The operator, running the AWS CLI and the public calif.io proof of "
        "SSM drives five nodes in private subnets. Three are EXPOSED: vuln-jdk21, "
        "vuln-jdk17 and vuln-jdk25, all c7i x86 instances running the same "
        "vulnerable AVX-512 VBMI intrinsic on three different affected Java trains "
-       "(Corretto 21.0.13, 17.0.21 and 25.0.5). Two are immune even though they "
+       "(Corretto 21.0.13, 17.0.13 and 25.0.5). Two are immune even though they "
        "run the same vulnerable Java: safe-arm, a t4g Graviton ARM64 instance, "
        "and safe-intel, a t3 x86 instance - neither has AVX-512 VBMI, so the bug "
        "cannot fire. There is no pre-patched node; patch.sh flips a vulnerable "

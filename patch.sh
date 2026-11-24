@@ -80,7 +80,7 @@ set -e
 cd /tmp
 OLD=\$(readlink -f /opt/java4shell/jdk 2>/dev/null || true)
 echo "downloading fixed JDK: ${url}"
-curl -fL --retry 4 --retry-delay 5 -o corretto-fixed.tar.gz "${url}"
+curl -fL --retry 20 --retry-delay 8 --retry-all-errors --retry-connrefused --connect-timeout 10 -o corretto-fixed.tar.gz "${url}"
 TOP=\$(tar tzf corretto-fixed.tar.gz | head -1 | cut -d/ -f1)
 tar xzf corretto-fixed.tar.gz -C /opt
 ln -sfn /opt/\$TOP /opt/java4shell/jdk

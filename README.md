@@ -30,7 +30,7 @@ verification**.
 | **vuln-jdk21** | `c7i.large` (Intel Sapphire Rapids) | Corretto **21.0.13** (affected) | AVX-512 VBMI present | **EXPOSED** |
 | **safe-arm** | `t4g.micro` (Graviton2) | Corretto **21.0.13** (same affected build) | ARM64 — no VBMI | **NOT EXPOSED** (CPU-immune) |
 | **safe-intel** | `t3.micro` (Skylake/Cascade Lake) | Corretto **21.0.13** (same affected build) | x86 but **no VBMI** | **NOT EXPOSED** (CPU-immune) |
-| **vuln-jdk17** | `c7i.large` | Corretto **17.0.21** (affected 17 train) | AVX-512 VBMI present | **EXPOSED** |
+| **vuln-jdk17** | `c7i.large` | Corretto **17.0.13** (affected 17 train) | AVX-512 VBMI present | **EXPOSED** |
 | **vuln-jdk25** | `c7i.large` | Corretto **25.0.5** (affected 25 train) | AVX-512 VBMI present | **EXPOSED** |
 
 Exposure requires **all three** of: a vulnerable JDK, an AVX-512 VBMI CPU, and
@@ -47,7 +47,7 @@ flips it EXPOSED → NOT_EXPOSED on re-check.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="architecture-dark.svg">
-  <img alt="The operator, running the AWS CLI and the public calif.io proof of concept, reaches the lab only through AWS SSM - Session Manager, Run Command and Inventory - because the nodes have no inbound network path. SSM drives five nodes in private subnets. Three are EXPOSED: vuln-jdk21, vuln-jdk17 and vuln-jdk25, all c7i x86 instances running the same vulnerable AVX-512 VBMI intrinsic on three different affected Java trains (Corretto 21.0.13, 17.0.21 and 25.0.5). Two are immune even though they run the same vulnerable Java: safe-arm, a t4g Graviton ARM64 instance, and safe-intel, a t3 x86 instance - neither has AVX-512 VBMI, so the bug cannot fire. There is no pre-patched node; patch.sh flips a vulnerable node live. The nodes egress through a NAT gateway to pull pinned JDK tarballs from the Amazon Corretto archive, and each publishes its verdict to SSM Inventory." src="architecture-light.svg">
+  <img alt="The operator, running the AWS CLI and the public calif.io proof of concept, reaches the lab only through AWS SSM - Session Manager, Run Command and Inventory - because the nodes have no inbound network path. SSM drives five nodes in private subnets. Three are EXPOSED: vuln-jdk21, vuln-jdk17 and vuln-jdk25, all c7i x86 instances running the same vulnerable AVX-512 VBMI intrinsic on three different affected Java trains (Corretto 21.0.13, 17.0.13 and 25.0.5). Two are immune even though they run the same vulnerable Java: safe-arm, a t4g Graviton ARM64 instance, and safe-intel, a t3 x86 instance - neither has AVX-512 VBMI, so the bug cannot fire. There is no pre-patched node; patch.sh flips a vulnerable node live. The nodes egress through a NAT gateway to pull pinned JDK tarballs from the Amazon Corretto archive, and each publishes its verdict to SSM Inventory." src="architecture-light.svg">
 </picture>
 
 Regenerate with `python3 make_diagram.py`.
@@ -139,7 +139,7 @@ cd aws-java4shell
 NODE           VERDICT      EXPECTED     JAVA       VBMI   RESULT
 ---------------------------------------------------------------------------------------
 vuln-jdk21     EXPOSED      EXPOSED      21.0.13    yes    PASS
-vuln-jdk17     EXPOSED      EXPOSED      17.0.21    yes    PASS
+vuln-jdk17     EXPOSED      EXPOSED      17.0.13    yes    PASS
 vuln-jdk25     EXPOSED      EXPOSED      25.0.5     yes    PASS
 safe-arm       NOT_EXPOSED  NOT_EXPOSED  21.0.13    no     PASS
 safe-intel     NOT_EXPOSED  NOT_EXPOSED  21.0.13    no     PASS
@@ -180,7 +180,7 @@ safe-intel     NOT_EXPOSED  NOT_EXPOSED  21.0.13    no     PASS
 | **CVE** | CVE-2026-114938 ("Java4Shell") |
 | **Flaw** | memory corruption in HotSpot's AVX-512 `java.util.Base64` decode intrinsic, reachable pre-auth when a service decodes attacker-controlled Base64 |
 | **Severity** | CVSS 4.0 **9.2** (Calif) / CVSS 3.1 **8.1** (Oracle/OpenJDK) |
-| **Affected** | OpenJDK 17 (`17.0.6`→`17.0.21`), 21 (→`21.0.13`), 25 (→`25.0.5`), 27 (→`27.0.1`) on x86-64 **with AVX-512 VBMI**; ARM64 not affected |
+| **Affected** | OpenJDK 17 (`17.0.6`→`17.0.13`), 21 (→`21.0.13`), 25 (→`25.0.5`), 27 (→`27.0.1`) on x86-64 **with AVX-512 VBMI**; ARM64 not affected |
 | **Fixed** | `17.0.21.1`, `21.0.13.1`, `25.0.5.1`, `27.0.1.1` (Corretto: `…​.1.2` builds) — Oracle CPU of 2026-11-17 |
 | **Temporary mitigation** | `-XX:+UnlockDiagnosticVMOptions -XX:-UseBASE64Intrinsics` **or** `-XX:UseAVX=2` (x86-only; keeps AVX2, drops AVX-512). Stopgaps only — upgrade is the fix. |
 

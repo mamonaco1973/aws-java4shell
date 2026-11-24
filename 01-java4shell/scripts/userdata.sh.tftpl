@@ -67,7 +67,7 @@ AZ=$(curl -s -H "X-aws-ec2-metadata-token: $${TOKEN}" \
 # ------------------------------------------------------------------------------
 echo "NOTE: downloading Corretto from $${JDK_URL}"
 JDK_OK=true
-if curl -fL --retry 4 --retry-delay 5 -o /tmp/corretto.tar.gz "$${JDK_URL}"; then
+if curl -fL --retry 20 --retry-delay 8 --retry-all-errors --retry-connrefused --connect-timeout 10 -o /tmp/corretto.tar.gz "$${JDK_URL}"; then
   JDK_TOPDIR=$(tar tzf /tmp/corretto.tar.gz | head -1 | cut -d/ -f1)
   tar xzf /tmp/corretto.tar.gz -C /opt
   ln -sfn "/opt/$${JDK_TOPDIR}" "$${APPDIR}/jdk"
@@ -217,10 +217,16 @@ VER=$(printf '%s\n'     "$${OUT}" | sed -n 's/^JAVA_VERSION=//p' | head -1)
 ARCH=$(printf '%s\n'    "$${OUT}" | sed -n 's/^ARCH=//p'         | head -1)
 VBMI=$(printf '%s\n'    "$${OUT}" | sed -n 's/^AVX512_VBMI=//p'  | head -1)
 REASON=$(printf '%s\n'  "$${OUT}" | sed -n 's/^REASON=//p'       | head -1)
-# The decoder may not be up on the first boot pass; the detector then sees only
-# the idle JDK, which still yields the right verdict for this node.
 [ -n "$${VERDICT}" ] || { VERDICT="UNKNOWN"; REASON="detector produced no verdict"; }
 [ -n "$${VER}" ] || VER="none"
+# A lab node is SUPPOSED to have a JDK. If the install failed, or the detector
+# found no JVM at all, say UNKNOWN — never let a missing runtime read as a
+# passing NOT_EXPOSED (that silently hid a broken download).
+if [ "$(cat $${APPDIR}/jdk_ok 2>/dev/null)" != "true" ] || [ "$${VER}" = "none" ]; then
+  VERDICT="UNKNOWN"
+  REASON="JDK did not install - verify the affected Corretto build URL (it may be pulled)"
+  VER="none"
+fi
 MIT="no"; [ "$${VERDICT}" = "MITIGATED" ] && MIT="yes"
 
 # --- Colour for the page ---
