@@ -10,7 +10,7 @@ The lab's point is **cloud-specific**: exploitability needs an x86-64 CPU with
 (ARM64)**. Three nodes — one per CPU class — make that concrete, and **each
 carries all three affected JDK trains (17 / 21 / 25) at once**, so the detector
 has to judge every installed JDK, not just one. The tooling here handles the
-defensive side — **exposure detection, fleet discovery, mitigation, and patch
+defensive side — **exposure detection, mitigation, and patch
 verification**.
 
 > ### ⚠️ Intentionally vulnerable — do not deploy to production
@@ -53,14 +53,14 @@ train (`./patch.sh vuln-x86 17`) to demonstrate a still-exposed mixed host.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="architecture-dark.svg">
-  <img alt="The operator, running the AWS CLI and the public calif.io proof of concept, reaches the lab only through AWS SSM - Session Manager, Run Command and Inventory - because the nodes have no inbound network path. SSM drives three nodes in private subnets, and every node installs all three affected Java trains at once (Corretto 17.0.13, 21.0.13 and 25.0.5), so the detector must judge every installed JDK. One node is EXPOSED: vuln-x86, a c7i x86 instance with the AVX-512 VBMI instruction the vulnerable intrinsic needs, so all three of its JDKs are exposed. The other two run the same three vulnerable JDKs but are immune because neither has AVX-512 VBMI: safe-arm, a t4g Graviton ARM64 instance, and safe-intel, a t3 x86 instance. There is no pre-patched node; patch.sh upgrades all three trains on a node live to flip it from EXPOSED to not exposed. The nodes egress through a NAT gateway to pull pinned JDK tarballs from the Amazon Corretto archive, and each publishes its verdict to SSM Inventory." src="architecture-light.svg">
+  <img alt="The operator, running the AWS CLI and the public calif.io proof of concept, reaches the lab only through AWS SSM - Session Manager and Run Command - because the nodes have no inbound network path. SSM drives three nodes in private subnets, and every node installs all three affected Java trains at once (Corretto 17.0.13, 21.0.13 and 25.0.5), so the detector must judge every installed JDK. One node is EXPOSED: vuln-x86, a c7i x86 instance with the AVX-512 VBMI instruction the vulnerable intrinsic needs, so all three of its JDKs are exposed. The other two run the same three vulnerable JDKs but are immune because neither has AVX-512 VBMI: safe-arm, a t4g Graviton ARM64 instance, and safe-intel, a t3 x86 instance. There is no pre-patched node; patch.sh upgrades all three trains on a node live to flip it from EXPOSED to not exposed. The nodes egress through a NAT gateway to pull pinned JDK tarballs from the Amazon Corretto archive." src="architecture-light.svg">
 </picture>
 
 Regenerate with `python3 make_diagram.py`.
 
 **`01-java4shell/`** is the whole stack: `networking.tf` (VPC, public/private
 subnets, IGW, NAT), `security.tf` (one egress-only group — no ingress anywhere),
-`iam.tf` (SSM role + `PutInventory`), `instances.tf` (the three nodes, rendered
+`iam.tf` (SSM role), `instances.tf` (the three nodes, rendered
 from `locals.tf` + `scripts/userdata.sh.tftpl`), `variables.tf` (the JDK
 coordinates), and `outputs.tf`.
 
@@ -84,23 +84,17 @@ so a node is exposed only when **all three** hold:
 
 The detector inspects **every** JVM on the box (running ones via `/proc`, plus
 installed JDKs), not just `java` on PATH. A thin lab wrapper then serves the
-verdict page on `:80` (reachable via an SSM tunnel) and publishes a
-**`Custom:Java4Shell` SSM Inventory** entry.
-
-Because the verdict is published to SSM Inventory, `fleet-query.sh` can list
-every affected node **account-wide** — including JDKs installed from a tarball,
-which the stock package inventory never sees.
+verdict page on `:80` (reachable via an SSM tunnel).
 
 ## Commands
 
 | Script | What it does |
 |---|---|
 | `./apply.sh` | check env, `terraform init && apply`, then `validate.sh` |
-| `./validate.sh` | wait for all nodes on SSM, assert each live verdict matches its intended one |
+| `./validate.sh` | wait for all nodes on SSM, print each live verdict + per-JDK breakdown |
 | `./check-exposure.sh` | **the portable detector** — read-only, run it on any host (`--porcelain`, `--no-exec`); the same script the nodes run |
 | `./lab-verdicts.sh [node...]` | print the live verdict + per-JDK breakdown for one/all lab nodes over SSM |
 | `./patch.sh [node] [train...]` | upgrade a node's JDKs in place to the fixed builds, restart, re-check (EXPOSED → NOT_EXPOSED); all three trains by default, or only the named ones |
-| `./fleet-query.sh` | SSM Inventory query of `Custom:Java4Shell`, account-wide for the region |
 | `./destroy.sh` | tear everything down |
 
 ## Prerequisites
@@ -140,31 +134,24 @@ cd aws-java4shell
 ./apply.sh
 ```
 
-`validate.sh` then prints each node's live verdict against its intended one,
-with the per-JDK breakdown underneath so you can see the detector judged all
-three trains:
+`validate.sh` then prints each node's live verdict, with the per-JDK breakdown
+underneath so you can see the detector judged all three trains:
 
 ```
-NODE         VERDICT      EXPECTED     VBMI   JDKS  RESULT
+NODE         VERDICT      VBMI   JDKS
 ---------------------------------------------------------------------------------------
-safe-arm     NOT_EXPOSED  NOT_EXPOSED  no     3     PASS
+safe-arm     NOT_EXPOSED  no     3
                  17.0.13  ->  NOT_EXPOSED
                  21.0.13  ->  NOT_EXPOSED
                  25.0.5  ->  NOT_EXPOSED
-safe-intel   NOT_EXPOSED  NOT_EXPOSED  no     3     PASS
+safe-intel   NOT_EXPOSED  no     3
                  17.0.13  ->  NOT_EXPOSED
                  21.0.13  ->  NOT_EXPOSED
                  25.0.5  ->  NOT_EXPOSED
-vuln-x86     EXPOSED      EXPOSED      yes    3     PASS
+vuln-x86     EXPOSED      yes    3
                  17.0.13  ->  EXPOSED
                  21.0.13  ->  EXPOSED
                  25.0.5  ->  EXPOSED
-
-=================================================================================
-  Java4Shell (CVE-2026-114938) — lab validation
-=================================================================================
-  RESULT: all nodes match their intended verdict. Lab is ready.
-=================================================================================
 ```
 
 ## Try it
@@ -178,12 +165,11 @@ vuln-x86     EXPOSED      EXPOSED      yes    3     PASS
      --parameters '{"portNumber":["80"],"localPortNumber":["8088"]}'
    # then open http://localhost:8088/
    ```
-2. **Triage the fleet:** `./fleet-query.sh` — one line per node, EXPOSED first.
-3. **Reach the decoder** (the exposure surface) the same way, forwarding
+2. **Reach the decoder** (the exposure surface) the same way, forwarding
    `8080`, and point your `calif.io/java4shell` PoC at `localhost`.
-4. **Remediate one train** to see a mixed host: `./patch.sh vuln-x86 17` leaves
+3. **Remediate one train** to see a mixed host: `./patch.sh vuln-x86 17` leaves
    21 and 25 vulnerable, so the node stays `EXPOSED` with 17 now clean.
-5. **Remediate fully:** `./patch.sh vuln-x86`, then `./lab-verdicts.sh vuln-x86`
+4. **Remediate fully:** `./patch.sh vuln-x86`, then `./lab-verdicts.sh vuln-x86`
    — all three trains upgrade and the verdict flips to `NOT_EXPOSED`.
 
 ## Teardown

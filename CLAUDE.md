@@ -6,8 +6,8 @@ An **intentionally vulnerable** educational lab for **CVE-2026-114938**
 ("Java4Shell"), the AVX-512 `java.util.Base64` decode-intrinsic memory
 corruption in OpenJDK. Three EC2 nodes demonstrate that exploitability is
 CPU-bound: a vulnerable JDK is EXPOSED on an x86-64 AVX-512 VBMI CPU but immune
-on ARM64. The repo covers the defensive workflow — exposure detection, fleet
-discovery, mitigation, and patch verification.
+on ARM64. The repo covers the defensive workflow — exposure detection,
+mitigation, and patch verification.
 
 **No exploit code lives here by design.** The repo builds the infrastructure
 and the (benign) exposure surface; the user runs the researchers' external PoC
@@ -21,7 +21,6 @@ and the (benign) exposure surface; the user runs the researchers' external PoC
 ./lab-verdicts.sh [node...]     # print live verdict(s) + per-JDK breakdown over SSM
 ./patch.sh [node] [train...]    # upgrade a node's JDKs in place to the fixed builds, re-check
                                 #   (all 3 trains by default; name trains for a partial/mixed patch)
-./fleet-query.sh                # SSM Inventory query of Custom:Java4Shell, account-wide
 ./destroy.sh                    # teardown
 ```
 
@@ -48,8 +47,7 @@ no ASG, no CloudWatch (dropped from the aws-autoscaling seed).
   (`scripts/userdata.sh.tftpl` writes `Decoder.java`), run as
   `java4shell-decoder.service` on the decoder train's JDK.
 - **Verdict:** `/opt/java4shell/exposure-check.sh` (written by user data) is the
-  single source of truth; it writes the verdict page + `verdict.json` and
-  publishes a `Custom:Java4Shell` SSM Inventory entry.
+  single source of truth; it writes the verdict page + `verdict.json`.
 - **Boot log:** `/root/userdata.log` on each node.
 
 ## JDK Sourcing (important)
@@ -115,6 +113,6 @@ needs its own state (separate clone or `terraform workspace`).
 | `01-java4shell/instances.tf` | the three nodes, rendered from the shared userdata template |
 | `01-java4shell/networking.tf` | VPC, public/private subnets, IGW, NAT |
 | `01-java4shell/security.tf` | single egress-only security group |
-| `01-java4shell/iam.tf` | SSM role + instance profile + `ssm:PutInventory` |
+| `01-java4shell/iam.tf` | SSM role + instance profile |
 | `01-java4shell/outputs.tf` | node IDs/IPs, expected verdicts, JDK URLs, SSM hints |
-| `01-java4shell/scripts/userdata.sh.tftpl` | installs Corretto, writes Decoder.java + exposure-check.sh, serves verdict, publishes inventory |
+| `01-java4shell/scripts/userdata.sh.tftpl` | installs Corretto, writes Decoder.java + exposure-check.sh, serves verdict |

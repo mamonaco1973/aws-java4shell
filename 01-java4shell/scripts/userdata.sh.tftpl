@@ -5,7 +5,7 @@
 # builds for ALL THREE affected trains (17 / 21 / 25), stands up a minimal
 # Base64-decode service (the realistic exposure surface for CVE-2026-114938) on
 # the decoder train, computes this node's exposure verdict across every installed
-# JDK, serves it as a page, and publishes it to SSM Inventory.
+# JDK and serves it as a page.
 #
 # Terraform substitutes the dollar-brace template values below at render time;
 # anything a shell variable needs is written doubled ($$) so it survives to the
@@ -29,7 +29,6 @@ EXPECTED_REASON="${expected_reason}"
 ARCH="${arch}"
 DECODER_MAJOR="${decoder_major}"
 DECODER_PORT="${decoder_port}"
-REGION="${region}"
 DEPLOYMENT="${deployment_name}"
 # One "major|version|url" line per affected train this node installs.
 JDKS="${jdks}"
@@ -41,20 +40,11 @@ mkdir -p "$${APPDIR}"
 # Packages
 # ForceIPv4: arm64 pulls from ports.ubuntu.com, whose AAAA records resolve on
 # instances with no IPv6, costing failed attempts per repo before IPv4 fallback.
-# awscli is needed for `aws ssm put-inventory`; jq builds that call's JSON;
 # apache2 serves the verdict page (localhost / SSM-tunnel only).
 # ------------------------------------------------------------------------------
 echo "NOTE: installing packages..."
 apt-get -o Acquire::ForceIPv4=true update -y
-apt-get -o Acquire::ForceIPv4=true install -y apache2 awscli jq curl ca-certificates tar
-
-# ------------------------------------------------------------------------------
-# IMDSv2 — identity for the inventory call
-# ------------------------------------------------------------------------------
-TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
-  -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-IID=$(curl -s -H "X-aws-ec2-metadata-token: $${TOKEN}" \
-  http://169.254.169.254/latest/meta-data/instance-id)
+apt-get -o Acquire::ForceIPv4=true install -y apache2 curl ca-certificates tar
 
 # ------------------------------------------------------------------------------
 # Install every affected JDK train for this node's architecture.
@@ -213,8 +203,7 @@ chmod +x "$${APPDIR}/check-exposure.sh"
 
 # ------------------------------------------------------------------------------
 # exposure-check.sh — thin lab wrapper. Runs the detector above, then publishes
-# this node's verdict as a page + Custom:Java4Shell SSM Inventory entry and
-# echoes the keys validate.sh / lab-verdicts.sh / patch.sh parse over SSM,
+# this node's verdict as a page and echoes the keys validate.sh / lab-verdicts.sh / patch.sh parse over SSM,
 # INCLUDING one JVM| line per installed JDK so the operator tooling can show
 # every train's individual verdict. It holds no detection logic of its own.
 # ------------------------------------------------------------------------------
@@ -225,7 +214,6 @@ set -uo pipefail
 NODE_ROLE="${node_role}"
 EXPECTED="${expected_verdict}"
 DEPLOYMENT="${deployment_name}"
-REGION="${region}"
 APPDIR=/opt/java4shell
 
 # Run the portable detector. --no-exec keeps it fast and side-effect-free at
@@ -312,26 +300,6 @@ cat > /var/www/html/index.html <<HTML
   <div class="foot">$${DEPLOYMENT} &bull; intentionally vulnerable lab</div>
 </div></body></html>
 HTML
-
-# --- publish to SSM Inventory (Custom:Java4Shell) ---
-TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
-  -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-IID=$(curl -s -H "X-aws-ec2-metadata-token: $${TOKEN}" \
-  http://169.254.169.254/latest/meta-data/instance-id)
-CAPTURE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-ITEMS=$(jq -nc \
-  --arg t "$${CAPTURE}" --arg role "$${NODE_ROLE}" --arg ver "$${VER}" \
-  --arg arch "$${ARCH}" --arg vbmi "$${VBMI}" --arg mit "$${MIT}" \
-  --arg verdict "$${VERDICT}" --arg dep "$${DEPLOYMENT}" --arg reason "$${REASON}" \
-  --arg jdks "$${JDK_COUNT}" \
-  '[{TypeName:"Custom:Java4Shell",SchemaVersion:"1.0",CaptureTime:$t,
-     Content:[{NodeRole:$role,JavaVersion:$ver,Arch:$arch,Avx512Vbmi:$vbmi,
-               Mitigated:$mit,Verdict:$verdict,Deployment:$dep,Reason:$reason,
-               JdkCount:$jdks}]}]')
-aws ssm put-inventory --region "$${REGION}" --instance-id "$${IID}" --items "$${ITEMS}" \
-  && echo "NOTE: published Custom:Java4Shell inventory for $${IID}" \
-  || echo "WARN: put-inventory failed (verdict page is still authoritative)"
 
 # --- machine-readable summary for Run Command callers ---
 echo "ROLE=$${NODE_ROLE}"

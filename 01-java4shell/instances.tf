@@ -65,7 +65,6 @@ resource "aws_instance" "node" {
       arch             = each.value.arch
       decoder_major    = local.decoder_major
       decoder_port     = var.decoder_port
-      region           = var.region
       deployment_name  = local.name
       # All three affected trains this node installs, one per line as
       # "major|version|url"; userdata loops over it and installs each.

@@ -100,7 +100,7 @@ NODES.update({
     "op":    (COL[1], ROW[0], "navy", "terminal", "Operator + PoC",
               "AWS CLI, and your calif.io PoC"),
     "ssm":   (COL[1], ROW[1], "purple", "key", "AWS SSM",
-              "Session Manager / Run Command / Inventory"),
+              "Session Manager / Run Command"),
     # One node per CPU class; each carries all three affected trains (17/21/25).
     # The EXPOSED node has the AVX-512 VBMI instruction the intrinsic needs.
     "vuln":  (COL[1], ROW[2], "danger", "cpu", "vuln-x86",
@@ -139,8 +139,8 @@ EDGES = {
 }
 
 ALT = ("The operator, running the AWS CLI and the public calif.io proof of "
-       "concept, reaches the lab only through AWS SSM - Session Manager, Run "
-       "Command and Inventory - because the nodes have no inbound network path. "
+       "concept, reaches the lab only through AWS SSM - Session Manager and Run "
+       "Command - because the nodes have no inbound network path. "
        "SSM drives three nodes in private subnets, and every node installs all "
        "three affected Java trains at once (Corretto 17.0.13, 21.0.13 and 25.0.5), "
        "so the detector must judge every installed JDK. One node is EXPOSED: "
@@ -151,8 +151,7 @@ ALT = ("The operator, running the AWS CLI and the public calif.io proof of "
        "safe-intel, a t3 x86 instance. There is no pre-patched node; patch.sh "
        "upgrades all three trains on a node live to flip it from EXPOSED to not "
        "exposed. The nodes egress through a NAT gateway to pull pinned JDK "
-       "tarballs from the Amazon Corretto archive, and each publishes its verdict "
-       "to SSM Inventory.")
+       "tarballs from the Amazon Corretto archive.")
 
 # ------------------------------------------------------------------------------
 # Rendering

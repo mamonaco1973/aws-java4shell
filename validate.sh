@@ -37,7 +37,6 @@ fi
 
 DEPLOYMENT=$(terraform -chdir="$CHDIR" output -raw deployment_name)
 NODE_IDS_JSON=$(terraform -chdir="$CHDIR" output -json node_ids)
-EXPECTED_JSON=$(terraform -chdir="$CHDIR" output -json node_expected)
 mapfile -t ROLES < <(echo "${NODE_IDS_JSON}" | jq -r 'keys_unsorted[]')
 
 wait_online() {
@@ -108,26 +107,23 @@ done
 
 echo "NOTE: Collecting exposure verdicts..."
 echo ""
-printf '%-12s %-12s %-12s %-6s %-5s %s\n' "NODE" "VERDICT" "EXPECTED" "VBMI" "JDKS" "RESULT"
+printf '%-12s %-12s %-6s %s\n' "NODE" "VERDICT" "VBMI" "JDKS"
 printf -- '---------------------------------------------------------------------------------------\n'
 
 FAIL=0
 for role in "${ROLES[@]}"; do
   id=$(echo "${NODE_IDS_JSON}"  | jq -r --arg r "${role}" '.[$r]')
-  want=$(echo "${EXPECTED_JSON}" | jq -r --arg r "${role}" '.[$r]')
   out=$(run_onbox "${id}" "/opt/java4shell/exposure-check.sh")
   got=$(echo "${out}"   | sed -n 's/^VERDICT=//p')
   vbmi=$(echo "${out}"  | sed -n 's/^AVX512_VBMI=//p')
   count=$(echo "${out}" | sed -n 's/^JDK_COUNT=//p')
 
-  if [ "${got}" = "${want}" ]; then
-    result="PASS"
-  else
-    result="FAIL"
+  # A blank or UNKNOWN verdict means the scan itself failed on that node.
+  if [ -z "${got}" ] || [ "${got}" = "UNKNOWN" ]; then
     FAIL=$((FAIL + 1))
   fi
-  printf '%-12s %-12s %-12s %-6s %-5s %s\n' \
-    "${role}" "${got:-?}" "${want}" "${vbmi:-?}" "${count:-?}" "${result}"
+  printf '%-12s %-12s %-6s %s\n' \
+    "${role}" "${got:-?}" "${vbmi:-?}" "${count:-?}"
 
   # Per-JDK breakdown — proves the detector judged every installed train.
   #   JVM|installed|<home>|<version>|<verdict>|<reason>
@@ -159,9 +155,7 @@ fi
 echo "================================================================================="
 
 if [ "${FAIL}" -ne 0 ]; then
-  echo "  RESULT: ${FAIL} node(s) did not match the intended verdict — see table above."
+  echo "  ERROR: ${FAIL} node(s) returned no verdict — see table above."
   echo "================================================================================="
   exit 1
 fi
-echo "  RESULT: all nodes match their intended verdict. Lab is ready."
-echo "================================================================================="

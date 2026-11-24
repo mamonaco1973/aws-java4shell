@@ -2,7 +2,7 @@
 # Outputs
 # Resource names carry a per-deployment suffix, so the harness scripts cannot
 # look anything up by a hardcoded name. These outputs are how check-exposure.sh,
-# patch.sh, validate.sh, and fleet-query.sh find the right nodes for THIS
+# patch.sh, validate.sh, and lab-verdicts.sh find the right nodes for THIS
 # deployment. Everything is keyed by role name.
 # ================================================================================
 
