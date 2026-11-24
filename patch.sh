@@ -78,12 +78,19 @@ patch_one() {
   read -r -d '' patch_cmd <<PATCH || true
 set -e
 cd /tmp
+OLD=\$(readlink -f /opt/java4shell/jdk 2>/dev/null || true)
 echo "downloading fixed JDK: ${url}"
 curl -fL --retry 4 --retry-delay 5 -o corretto-fixed.tar.gz "${url}"
 TOP=\$(tar tzf corretto-fixed.tar.gz | head -1 | cut -d/ -f1)
 tar xzf corretto-fixed.tar.gz -C /opt
 ln -sfn /opt/\$TOP /opt/java4shell/jdk
 echo true > /opt/java4shell/jdk_ok
+# Remove the old vulnerable JDK. The detector scans EVERY installed JDK and
+# takes the worst verdict, so an idle vulnerable runtime left under /opt would
+# keep the host EXPOSED even after the service restarts on the fixed build —
+# exactly what a real upgrade removes.
+if [ -n "\$OLD" ] && [ "\$OLD" != "/opt/\$TOP" ] && \
+   printf '%s' "\$OLD" | grep -q '^/opt/'; then rm -rf "\$OLD"; fi
 systemctl restart java4shell-decoder
 /opt/java4shell/exposure-check.sh
 PATCH
