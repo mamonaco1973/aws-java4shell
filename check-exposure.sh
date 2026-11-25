@@ -27,18 +27,30 @@ set -euo pipefail
 #   ./check-exposure.sh --porcelain  # machine-readable KEY=value block
 #   ./check-exposure.sh --no-exec    # never launch java (version from release
 #                                    #   files only); for locked-down hosts
+#   ./check-exposure.sh --root DIR   # also search DIR for JDKs (repeatable),
+#                                    #   for site-specific install paths
+#   ./check-exposure.sh --full       # search the whole filesystem (slow; also
+#                                    #   finds JDKs inside container image layers)
 # Exit: 0 = nothing exposed, 2 = a vulnerable unmitigated JVM, 1 = needs review.
 # ==============================================================================
 
 PORCELAIN=false
 NO_EXEC=false
-for arg in "$@"; do
-  case "$arg" in
+FULL=false
+EXTRA_ROOTS=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --porcelain) PORCELAIN=true ;;
     --no-exec)   NO_EXEC=true ;;
-    -h|--help)   sed -n '4,33p' "$0"; exit 0 ;;
-    *) echo "unknown option: $arg" >&2; exit 64 ;;
+    --full)      FULL=true ;;
+    --root)
+      [ "$#" -ge 2 ] || { echo "--root needs a directory" >&2; exit 64; }
+      EXTRA_ROOTS+=("$2"); shift ;;
+    --root=*)    EXTRA_ROOTS+=("${1#--root=}") ;;
+    -h|--help)   sed -n '4,35p' "$0"; exit 0 ;;
+    *) echo "unknown option: $1" >&2; exit 64 ;;
   esac
+  shift
 done
 
 # ------------------------------------------------------------------------------
@@ -209,7 +221,9 @@ scan_running() {
 
 # Every java/javac binary we can discover, from many sources — PATH, JAVA_HOME,
 # the alternatives system, the standard cross-distro install roots (including
-# RHEL's lib64 and snap), and per-user SDKMAN trees. Overlap between sources is
+# RHEL's lib64 and snap), the places apps bundle their own runtime (/usr/share,
+# /usr/local, /srv, /app), user homes (unpacked tarballs, SDKMAN, IDE runtimes),
+# any --root DIR, or the whole filesystem with --full. Overlap between sources is
 # fine: scan_installed de-dupes by JDK home. Each producer is guarded so a miss
 # (no javac, no alternatives, an unset JAVA_HOME, an absent root) cannot trip the
 # script's `set -e` — notably `command -v java` exits non-zero when java is not
@@ -224,11 +238,51 @@ jdk_candidates() {
     update-alternatives --list java  2>/dev/null || true
     update-alternatives --list javac 2>/dev/null || true
   fi
+  local roots
+  if [ "$FULL" = true ]; then
+    # Every local disk mount (kernel pseudo-filesystems and network shares
+    # excluded); -xdev keeps each walk on its own mount.
+    mapfile -t roots < <(awk '$3 ~ /^(ext[234]|xfs|btrfs|zfs|overlay|vfat|f2fs)$/ \
+      { print $2 }' /proc/mounts | sort -u)
+    find "${roots[@]}" -xdev -name java -type f 2>/dev/null || true
+    return 0
+  fi
   # -maxdepth 8: vendors nest a JDK several levels deep (…/suite/runtime/jdk).
-  find /usr/lib/jvm /usr/lib64/jvm /usr/java /opt /snap /usr/local/lib/jvm \
-    -maxdepth 8 -name java -type f 2>/dev/null || true
-  # SDKMAN installs under each home get their own, shallower root.
-  find /root/.sdkman /home/*/.sdkman -maxdepth 6 -name java -type f 2>/dev/null || true
+  # /usr/share holds runtimes bundled by packaged apps (Elasticsearch, IDEs).
+  # -xdev and local_only keep the walk off network mounts, which can be huge
+  # and slow (an NFS home, a cloud-drive FUSE mount under someone's home).
+  mapfile -t roots < <(local_only /usr/lib/jvm /usr/lib64/jvm /usr/java /opt \
+    /snap /usr/local /usr/share /srv /app /root /home)
+  if [ "${#roots[@]}" -gt 0 ]; then
+    find "${roots[@]}" -xdev -maxdepth 8 -name java -type f 2>/dev/null || true
+  fi
+  # --root DIR is searched as given, wherever it lives.
+  if [ "${#EXTRA_ROOTS[@]}" -gt 0 ]; then
+    find "${EXTRA_ROOTS[@]}" -maxdepth 12 -name java -type f 2>/dev/null || true
+  fi
+}
+
+# local_only DIR... — echo each DIR that exists and is not on a network or
+# FUSE filesystem.
+local_only() {
+  local d t
+  for d in "$@"; do
+    [ -d "$d" ] || continue
+    t="$(stat -f -c %T "$d" 2>/dev/null || echo unknown)"
+    case "$t" in
+      nfs*|cifs|smb*|fuse*|9p|ceph|sshfs|glusterfs|unknown) continue ;;
+    esac
+    printf '%s\n' "$d"
+  done
+}
+
+# is_jdk_home DIR — true when DIR holds a Java runtime: a release file or a
+# libjvm.so (lib/server/ on 9+, jre/lib/<arch>/server/ on 8). Wider searches
+# turn up other files named "java" (wrapper scripts, completion files); this
+# keeps the scan from judging them, or launching them to read a version.
+is_jdk_home() {
+  [ -r "$1/release" ] && return 0
+  [ -n "$(find "$1" -maxdepth 5 -name libjvm.so -print -quit 2>/dev/null)" ]
 }
 
 # Installed JDKs (may be idle): judge every one jdk_candidates found, de-duped by
@@ -247,6 +301,7 @@ scan_installed() {
     home="$(dirname "$(dirname "$real")")"
     [[ "$seen" != *" $home "* ]] || continue
     seen+="$home "
+    is_jdk_home "$home" || continue
     raw="$(jvm_version "$real")"
     if [ -z "$raw" ]; then
       add_row installed "$home" "unknown" REVIEW \

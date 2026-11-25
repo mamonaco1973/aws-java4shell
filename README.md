@@ -83,7 +83,11 @@ so a node is exposed only when **all three** hold:
 3. **the intrinsic enabled** — no mitigating JVM flag.
 
 The detector inspects **every** JVM on the box (running ones via `/proc`, plus
-installed JDKs), not just `java` on PATH. A thin lab wrapper then serves the
+installed JDKs), not just `java` on PATH. Installed JDKs are found through PATH,
+`JAVA_HOME`, `update-alternatives`, and a search of the usual install roots,
+`/usr/share` and `/usr/local` (where apps bundle their own runtime), `/srv`,
+`/app` and user homes. Network mounts are skipped. `--root DIR` adds a
+site-specific path, and `--full` searches every local disk. A thin lab wrapper then serves the
 verdict page on `:80` (reachable via an SSM tunnel).
 
 ## Commands
@@ -92,7 +96,7 @@ verdict page on `:80` (reachable via an SSM tunnel).
 |---|---|
 | `./apply.sh` | check env, `terraform init && apply`, then `validate.sh` |
 | `./validate.sh` | wait for all nodes on SSM, print each live verdict + per-JDK breakdown |
-| `./check-exposure.sh` | **the portable detector** — read-only, run it on any host (`--porcelain`, `--no-exec`); the same script the nodes run |
+| `./check-exposure.sh` | **the portable detector** — read-only, run it on any host (`--porcelain`, `--no-exec`, `--root DIR`, `--full`); the same script the nodes run |
 | `./lab-verdicts.sh [node...]` | print the live verdict + per-JDK breakdown for one/all lab nodes over SSM |
 | `./patch.sh [node] [train...]` | upgrade a node's JDKs in place to the fixed builds, restart, re-check (EXPOSED → NOT_EXPOSED); all three trains by default, or only the named ones |
 | `./destroy.sh` | tear everything down |
